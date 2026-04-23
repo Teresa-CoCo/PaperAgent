@@ -694,6 +694,30 @@ class PaperService:
             )
         return {"category": category, "fetched": len(papers), "inserted": inserted, "updated": updated}
 
+    def upsert_papers(self, category: str, papers: list[dict]) -> dict:
+        return self._store_crawl_result(category, papers)
+
+    def get_paper_by_arxiv_id(self, arxiv_id: str) -> dict:
+        with transaction() as connection:
+            row = connection.execute("SELECT * FROM papers WHERE arxiv_id = ?", (arxiv_id,)).fetchone()
+        if not row:
+            raise AppError("Paper not found", 404, "paper_not_found")
+        paper = paper_to_api(row)
+        paper["markdown"] = self.read_markdown(row.get("markdown_path"))
+        return paper
+
+    def save_markdown_artifacts(self, paper_id: int, markdown_path: Path, storage_dir: Path, markdown: str) -> None:
+        with transaction() as connection:
+            connection.execute(
+                """
+                UPDATE papers
+                SET markdown_path = ?, storage_dir = ?, analyzed_at = analyzed_at
+                WHERE id = ?
+                """,
+                (str(markdown_path), str(storage_dir), paper_id),
+            )
+        self.replace_chunks(paper_id, markdown)
+
     def storage_dir_for(self, paper_id: int, category: str) -> Path:
         safe_category = category.replace("/", "_")
         return self.settings.storage_root / date.today().isoformat() / safe_category / str(paper_id)

@@ -32,6 +32,11 @@ class Settings(BaseSettings):
 
     default_arxiv_categories: str = "cs.AI,cs.CL,cs.CV,cs.GR,cs.LG,stat.ML"
     crawl_interval_minutes: int = 720
+    daily_paper_default_max_results: int = 12
+    daily_paper_summary_chars: int = 18_000
+    rag_chroma_path: Path = Path("./data/chroma")
+    rag_collection_name: str = "daily_paper_chunks"
+    rag_embedding_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
 
     @staticmethod
     def csv_list(value: str) -> list[str]:
@@ -48,6 +53,7 @@ class Settings(BaseSettings):
     def ensure_paths(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_root.mkdir(parents=True, exist_ok=True)
+        self.rag_chroma_path.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

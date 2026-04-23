@@ -151,3 +151,39 @@ CREATE TABLE IF NOT EXISTS paper_favorites (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(user_id, paper_id)
 );
+
+CREATE TABLE IF NOT EXISTS daily_paper_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  target_date TEXT NOT NULL,
+  categories TEXT NOT NULL DEFAULT '[]',
+  max_results INTEGER NOT NULL DEFAULT 12,
+  status TEXT NOT NULL DEFAULT 'queued',
+  total_papers INTEGER NOT NULL DEFAULT 0,
+  completed_papers INTEGER NOT NULL DEFAULT 0,
+  inserted_count INTEGER NOT NULL DEFAULT 0,
+  updated_count INTEGER NOT NULL DEFAULT 0,
+  error_message TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS daily_papers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER REFERENCES daily_paper_runs(id) ON DELETE SET NULL,
+  paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  target_date TEXT NOT NULL,
+  category TEXT NOT NULL,
+  short_summary TEXT NOT NULL DEFAULT '',
+  long_summary TEXT NOT NULL DEFAULT '',
+  markdown_path TEXT,
+  rag_collection TEXT,
+  rag_document_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'queued',
+  error_message TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(target_date, paper_id, category)
+);

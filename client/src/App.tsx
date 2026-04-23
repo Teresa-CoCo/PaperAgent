@@ -1,13 +1,20 @@
 import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import { ChatPanel } from "./components/ChatPanel";
+import { DailyPaperPanel } from "./components/DailyPaperPanel";
 import { PaperList } from "./components/PaperList";
 import { PaperViewer } from "./components/PaperViewer";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar, type LibraryMode } from "./components/Sidebar";
-import { api, type ChatMessage, type ChatSession, type CrawlJob, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper } from "./lib/api";
+import { api, type ChatMessage, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper } from "./lib/api";
 
 type ViewMode = "summary" | "markdown" | "pdf";
 type ChatMode = "paper" | "ace";
+
+function yesterdayString() {
+  const target = new Date();
+  target.setDate(target.getDate() - 1);
+  return target.toISOString().slice(0, 10);
+}
 
 export default function App() {
   const [categories, setCategories] = useState<string[]>(["cs.AI"]);
@@ -28,6 +35,11 @@ export default function App() {
   const [libraryMode, setLibraryMode] = useState<LibraryMode>("all");
   const [folders, setFolders] = useState<FavoriteFolder[]>([]);
   const [crawlJobs, setCrawlJobs] = useState<CrawlJob[]>([]);
+  const [dailyPapers, setDailyPapers] = useState<DailyPaperEntry[]>([]);
+  const [dailyRuns, setDailyRuns] = useState<DailyPaperRun[]>([]);
+  const [dailyCategories, setDailyCategories] = useState<string[]>(["cs.AI"]);
+  const [dailyTargetDate, setDailyTargetDate] = useState(yesterdayString);
+  const [dailyMaxResults, setDailyMaxResults] = useState(12);
   const [activeFolderId, setActiveFolderId] = useState<number | undefined>();
   const [newFolderName, setNewFolderName] = useState("");
   const [leftCollapsed, setLeftCollapsed] = useState(false);
@@ -35,7 +47,9 @@ export default function App() {
   const [leftWidth, setLeftWidth] = useState(300);
   const [rightWidth, setRightWidth] = useState(340);
   const [paperLoading, setPaperLoading] = useState(false);
+  const [dailyLoading, setDailyLoading] = useState(false);
   const [crawlLoading, setCrawlLoading] = useState(false);
+  const [dailyGenerating, setDailyGenerating] = useState(false);
   const [chatLoading, setChatLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
@@ -60,16 +74,22 @@ export default function App() {
     api.config().then((data) => {
       setCategories(data.categories);
       setCategory(data.categories[0] || "cs.AI");
+      setDailyCategories([data.categories.find((item) => item !== "all") || data.categories[0] || "cs.AI"]);
     }).catch((reason) => setError(reason.message));
     api.quota().then(setQuota).catch(() => undefined);
     api.favoriteFolders().then((data) => setFolders(data.items)).catch(() => undefined);
     api.listSessions().then((data) => setSessions(data.items)).catch(() => undefined);
     api.crawlJobs().then((data) => setCrawlJobs(data.items)).catch(() => undefined);
+    api.dailyPaperRuns().then((data) => setDailyRuns(data.items)).catch(() => undefined);
   }, []);
 
   useEffect(() => {
+    if (libraryMode === "daily") {
+      void loadDailyPapers();
+      return;
+    }
     void loadPapers(category, query);
-  }, [category, query, dateFilters, libraryMode, activeFolderId]);
+  }, [category, query, dateFilters, libraryMode, activeFolderId, dailyTargetDate, dailyCategories]);
 
   useEffect(() => {
     const visibleIds = new Set(papers.map((paper) => paper.id));
@@ -96,8 +116,21 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [crawlJobs, category, query]);
 
+  useEffect(() => {
+    const hasActiveRun = dailyRuns.some((run) => run.status === "queued" || run.status === "running");
+    if (!hasActiveRun) return;
+    const timer = window.setInterval(async () => {
+      const latest = await api.dailyPaperRuns();
+      setDailyRuns(latest.items);
+      if (libraryMode === "daily") {
+        await loadDailyPapers();
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [dailyRuns, libraryMode, dailyTargetDate, dailyCategories]);
+
   async function loadPapers(nextCategory = category, nextQuery = query) {
-    if (libraryMode === "settings") return;
+    if (libraryMode === "settings" || libraryMode === "daily") return;
     setPaperLoading(true);
     setError("");
     try {
@@ -112,6 +145,23 @@ export default function App() {
       setError((reason as Error).message);
     } finally {
       setPaperLoading(false);
+    }
+  }
+
+  async function loadDailyPapers(nextTargetDate = dailyTargetDate, nextCategories = dailyCategories) {
+    setDailyLoading(true);
+    setError("");
+    try {
+      const [paperData, runData] = await Promise.all([
+        api.dailyPapers(nextTargetDate, nextCategories),
+        api.dailyPaperRuns()
+      ]);
+      setDailyPapers(paperData.items);
+      setDailyRuns(runData.items);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setDailyLoading(false);
     }
   }
 
@@ -175,6 +225,37 @@ export default function App() {
       setError((reason as Error).message);
     } finally {
       setCrawlLoading(false);
+    }
+  }
+
+  async function generateDailyPaper() {
+    if (dailyCategories.length === 0) return;
+    setDailyGenerating(true);
+    setError("");
+    try {
+      const run = await api.generateDailyPaper({
+        categories: dailyCategories,
+        targetDate: dailyTargetDate,
+        maxResults: dailyMaxResults
+      });
+      setDailyRuns((items) => [run, ...items.filter((item) => item.id !== run.id)]);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setDailyGenerating(false);
+    }
+  }
+
+  async function stopDailyPaperRun(runId: number) {
+    setError("");
+    try {
+      const run = await api.cancelDailyPaperRun(runId);
+      setDailyRuns((items) => items.map((item) => item.id === runId ? run : item));
+      if (libraryMode === "daily") {
+        await loadDailyPapers();
+      }
+    } catch (reason) {
+      setError((reason as Error).message);
     }
   }
 
@@ -459,6 +540,23 @@ export default function App() {
               setSelectedPaperIds([]);
               void loadPapers(category, query);
             }}
+          />
+        ) : libraryMode === "daily" ? (
+          <DailyPaperPanel
+            categories={categories}
+            selectedCategories={dailyCategories}
+            targetDate={dailyTargetDate}
+            maxResults={dailyMaxResults}
+            entries={dailyPapers}
+            runs={dailyRuns}
+            loading={dailyLoading}
+            generating={dailyGenerating}
+            error={error}
+            onCategories={setDailyCategories}
+            onTargetDate={setDailyTargetDate}
+            onMaxResults={setDailyMaxResults}
+            onGenerate={generateDailyPaper}
+            onStopRun={stopDailyPaperRun}
           />
         ) : (
           <>

@@ -2,7 +2,7 @@ import { CalendarPicker } from "./CalendarPicker";
 import { GlassPanel } from "./GlassPanel";
 import type { CrawlJob, DateFilter, FavoriteFolder, OcrQuota } from "../lib/api";
 
-export type LibraryMode = "all" | "parsed" | "favorites" | "recommendations" | "settings";
+export type LibraryMode = "all" | "parsed" | "favorites" | "recommendations" | "daily" | "settings";
 
 type Props = {
   collapsed: boolean;
@@ -134,6 +134,9 @@ export function Sidebar({
               </button>
               <button className={libraryMode === "recommendations" ? "category active" : "category"} onClick={() => onLibraryMode("recommendations")}>
                 推荐文章
+              </button>
+              <button className={libraryMode === "daily" ? "category active" : "category"} onClick={() => onLibraryMode("daily")}>
+                Daily Paper
               </button>
               <button className={libraryMode === "settings" ? "category active" : "category"} onClick={() => onLibraryMode("settings")}>
                 设置

@@ -12,6 +12,7 @@ import httpx
 ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV = "{http://arxiv.org/schemas/atom}"
 ARXIV_REQUEST_DELAY_SECONDS = 3.0
+ARXIV_QUERY_PAGE_SIZE = 200
 _arxiv_request_lock = asyncio.Lock()
 _last_arxiv_request_at = 0.0
 
@@ -90,18 +91,29 @@ class ArxivTool:
             end_token = datetime.combine(end_date + timedelta(days=1), datetime.min.time()).strftime("%Y%m%d%H%M")
             search_parts.append(f"submittedDate:[{start_token} TO {end_token}]")
         search_query = urllib.parse.quote(" AND ".join(search_parts))
-        url = (
-            "https://export.arxiv.org/api/query"
-            f"?search_query={search_query}&sortBy=submittedDate&sortOrder=descending"
-            f"&start=0&max_results={max_results}"
-        )
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await self._get(client, url)
-            response.raise_for_status()
-        root = ET.fromstring(response.text)
         papers: list[dict] = []
-        for entry in root.findall(f"{ATOM}entry"):
-            papers.append(self._paper_from_atom(entry, category))
+        remaining = max_results
+        start = 0
+        async with httpx.AsyncClient(timeout=60) as client:
+            while remaining > 0:
+                page_size = min(remaining, ARXIV_QUERY_PAGE_SIZE)
+                url = (
+                    "https://export.arxiv.org/api/query"
+                    f"?search_query={search_query}&sortBy=submittedDate&sortOrder=descending"
+                    f"&start={start}&max_results={page_size}"
+                )
+                response = await self._get(client, url)
+                response.raise_for_status()
+                root = ET.fromstring(response.text)
+                entries = root.findall(f"{ATOM}entry")
+                if not entries:
+                    break
+                for entry in entries:
+                    papers.append(self._paper_from_atom(entry, category))
+                if len(entries) < page_size:
+                    break
+                remaining -= len(entries)
+                start += len(entries)
         return papers
 
     def _paper_from_atom(self, entry: ET.Element, requested_category: str | None = None) -> dict:

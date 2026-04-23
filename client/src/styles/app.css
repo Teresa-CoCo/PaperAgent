@@ -1266,6 +1266,118 @@ button:disabled {
   overflow: hidden;
 }
 
+.daily-paper-panel {
+  display: grid;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.daily-paper-shell {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  padding: 18px;
+}
+
+.daily-paper-header,
+.daily-paper-card-head,
+.daily-summary-head,
+.daily-paper-controls {
+  display: grid;
+  gap: 12px;
+}
+
+.daily-paper-controls {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.daily-paper-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.daily-control,
+.daily-fieldset,
+.daily-run-card,
+.daily-paper-card,
+.daily-summary-block {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.daily-control span,
+.daily-fieldset > span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.daily-control input {
+  min-height: 38px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.32);
+  color: var(--ink);
+  padding: 8px 10px;
+}
+
+.daily-run-strip,
+.daily-paper-list {
+  display: grid;
+  gap: 12px;
+}
+
+.daily-paper-card-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.daily-paper-card h3 {
+  margin: 2px 0 0;
+  line-height: 1.25;
+}
+
+.daily-paper-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.daily-paper-links a,
+.daily-summary-head button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--ink);
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.run-stop-button {
+  justify-self: start;
+  border: 1px solid rgba(184, 55, 47, 0.4);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: white;
+  background: var(--danger);
+}
+
+.daily-summary-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.daily-summary-block.detailed {
+  background: rgba(11, 143, 106, 0.08);
+}
+
 .settings-header {
   padding: 18px;
   border-bottom: 1px solid var(--line);
@@ -1379,7 +1491,11 @@ button:disabled {
 
   .viewer-header,
   .chat-head,
-  .selection-bar {
+  .selection-bar,
+  .daily-paper-header,
+  .daily-paper-controls,
+  .daily-paper-card-head,
+  .daily-summary-head {
     grid-template-columns: 1fr;
   }
 

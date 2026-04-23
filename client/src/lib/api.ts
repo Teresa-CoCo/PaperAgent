@@ -112,6 +112,48 @@ export type CrawlJob = {
   steps?: CrawlStep[];
 };
 
+export type DailyPaperRun = {
+  id: number;
+  targetDate: string;
+  categories: string[];
+  maxResults: number;
+  status: "queued" | "running" | "done" | "partial" | "failed" | "cancelled";
+  totalPapers: number;
+  completedPapers: number;
+  inserted: number;
+  updated: number;
+  errorMessage?: string;
+  createdAt: string;
+  startedAt?: string;
+  updatedAt: string;
+  finishedAt?: string;
+};
+
+export type DailyPaperEntry = {
+  id: number;
+  runId?: number;
+  paperId: number;
+  targetDate: string;
+  category: string;
+  title: string;
+  authors: string[];
+  abstract: string;
+  shortSummary: string;
+  longSummary: string;
+  status: "queued" | "ready" | "failed";
+  errorMessage?: string;
+  markdownPath?: string;
+  ragCollection?: string;
+  ragDocumentCount: number;
+  arxivId: string;
+  version: number;
+  pdfUrl: string;
+  absUrl: string;
+  publishedAt?: string;
+  updatedAt?: string;
+  tags: string[];
+};
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
@@ -156,6 +198,24 @@ export const api = {
     }),
   crawlJobs: () => request<{ items: CrawlJob[] }>("/api/papers/crawl/jobs"),
   crawlJob: (id: number) => request<CrawlJob>(`/api/papers/crawl/jobs/${id}`),
+  dailyPapers: (targetDate?: string, categories: string[] = []) => {
+    const params = new URLSearchParams();
+    if (targetDate) params.set("targetDate", targetDate);
+    if (categories.length) params.set("categories", categories.join(","));
+    return request<{ items: DailyPaperEntry[] }>(`/api/daily-papers?${params.toString()}`);
+  },
+  dailyPaperRuns: () => request<{ items: DailyPaperRun[] }>("/api/daily-papers/runs"),
+  dailyPaperRun: (id: number) => request<DailyPaperRun>(`/api/daily-papers/runs/${id}`),
+  cancelDailyPaperRun: (id: number) =>
+    request<DailyPaperRun>(`/api/daily-papers/runs/${id}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({})
+    }),
+  generateDailyPaper: (payload: { categories: string[]; targetDate: string; maxResults?: number }) =>
+    request<DailyPaperRun>("/api/daily-papers/runs", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   submitOcr: (paperId: number) =>
     request<OcrJob>(`/api/papers/${paperId}/ocr`, {
       method: "POST",
