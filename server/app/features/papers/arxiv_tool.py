@@ -41,12 +41,17 @@ class ArxivTool:
             _last_arxiv_request_at = time.monotonic()
             return response
 
-    async def query_announced_new(self, category: str, max_results: int | None = None) -> list[dict]:
+    async def query_announced_new(
+        self,
+        category: str,
+        max_results: int | None = None,
+        announced_date: date | None = None,
+    ) -> list[dict]:
         url = f"https://arxiv.org/list/{category}/new"
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await self._get(client, url)
             response.raise_for_status()
-        page_papers = self._papers_from_new_page(response.text, category, max_results)
+        page_papers = self._papers_from_new_page(response.text, category, max_results, announced_date or date.today())
         ids = [paper["arxiv_id"] for paper in page_papers]
         if not ids:
             return await self.query(category, max_results or 20)
@@ -155,16 +160,28 @@ class ArxivTool:
             },
         }
 
-    def _papers_from_new_page(self, html_text: str, category: str, max_results: int | None = None) -> list[dict]:
+    def _papers_from_new_page(
+        self,
+        html_text: str,
+        category: str,
+        max_results: int | None = None,
+        announced_date: date | None = None,
+    ) -> list[dict]:
         papers: list[dict] = []
         for dt, dd in self._new_page_items(html_text, category, max_results):
-            paper = self._paper_from_new_page_item(dt, dd, category)
+            paper = self._paper_from_new_page_item(dt, dd, category, announced_date or date.today())
             if paper:
                 papers.append(paper)
         return papers
 
-    def _ids_from_new_page(self, html_text: str, category: str, max_results: int | None = None) -> list[str]:
-        return [paper["arxiv_id"] for paper in self._papers_from_new_page(html_text, category, max_results)]
+    def _ids_from_new_page(
+        self,
+        html_text: str,
+        category: str,
+        max_results: int | None = None,
+        announced_date: date | None = None,
+    ) -> list[str]:
+        return [paper["arxiv_id"] for paper in self._papers_from_new_page(html_text, category, max_results, announced_date)]
 
     def _new_page_items(self, html_text: str, category: str, max_results: int | None = None) -> list[tuple[str, str]]:
         section_cutoffs = []
@@ -193,7 +210,13 @@ class ArxivTool:
                 break
         return items
 
-    def _paper_from_new_page_item(self, dt: str, dd: str, requested_category: str) -> dict | None:
+    def _paper_from_new_page_item(
+        self,
+        dt: str,
+        dd: str,
+        requested_category: str,
+        announced_date: date,
+    ) -> dict | None:
         link = re.search(
             r"<a\b(?=[^>]*\btitle=['\"]Abstract['\"])(?=[^>]*\bhref\s*=\s*['\"](?P<href>/abs/[^'\"]+)['\"])",
             dt,
@@ -214,8 +237,8 @@ class ArxivTool:
             "tags": categories,
             "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
             "abs_url": f"https://arxiv.org/abs/{arxiv_id}",
-            "published_at": date.today().isoformat(),
-            "updated_at": date.today().isoformat(),
+            "published_at": announced_date.isoformat(),
+            "updated_at": announced_date.isoformat(),
             "raw_metadata": {
                 "source": "arxiv_new_page",
                 "categories": categories,

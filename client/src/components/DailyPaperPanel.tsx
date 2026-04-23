@@ -37,7 +37,19 @@ export function DailyPaperPanel({
   onStopRun
 }: Props) {
   const [expandedIds, setExpandedIds] = useState<number[]>([]);
+  const [digestExpanded, setDigestExpanded] = useState(true);
   const selectedSet = useMemo(() => new Set(selectedCategories), [selectedCategories]);
+  const digestMarkdown = useMemo(() => {
+    if (entries.length === 0) return "";
+    return entries.map((entry, index) => (
+      [
+        `${index + 1}. **${entry.title}**`,
+        `   - arXiv: ${entry.arxivId} · ${entry.category} · v${entry.version}`,
+        `   - Authors: ${entry.authors.slice(0, 6).join(", ") || "Unknown"}`,
+        `   - Summary: ${(entry.shortSummary || entry.abstract || "").replace(/\n+/g, " ").trim()}`
+      ].join("\n")
+    )).join("\n\n");
+  }, [entries]);
 
   function toggleCategory(category: string) {
     if (selectedSet.has(category)) {
@@ -138,6 +150,25 @@ export function DailyPaperPanel({
           <div className="empty-state">
             <p>当前日期和领域还没有 Daily Paper。选择领域后点击上方按钮生成。</p>
           </div>
+        )}
+
+        {!loading && entries.length > 0 && (
+          <section className="daily-summary-block digest-block">
+            <div className="daily-summary-head">
+              <strong>当日全部文章缩略汇总</strong>
+              <button onClick={() => setDigestExpanded((value) => !value)}>
+                {digestExpanded ? "收起汇总" : "展开汇总"}
+              </button>
+            </div>
+            <p className="paper-date">
+              共 {entries.length} 篇，按当前日期与领域筛选生成；包含标题、基础信息与缩略总结。
+            </p>
+            {digestExpanded && (
+              <MarkdownText className="markdown-text">
+                {digestMarkdown}
+              </MarkdownText>
+            )}
+          </section>
         )}
 
         <section className="daily-paper-list">

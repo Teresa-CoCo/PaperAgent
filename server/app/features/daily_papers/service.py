@@ -16,6 +16,7 @@ from app.features.users.service import ensure_user
 
 
 _daily_queue_lock = asyncio.Lock()
+DAILY_PAPER_PIPELINE_CONCURRENCY = 2
 
 
 def _json(value: object) -> str:
@@ -320,36 +321,51 @@ class DailyPaperService:
         inserted = 0
         updated = 0
         errors: list[str] = []
+        progress_lock = asyncio.Lock()
 
         for category in categories:
             if self._is_cancelled(run_id):
                 self._finish_cancelled_run(run_id, total_papers, completed, inserted, updated, errors)
                 return
             try:
-                crawled = await self.arxiv.query(category, max_results, date.fromisoformat(target_date), date.fromisoformat(target_date))
+                crawled = await self.papers.fetch_papers_for_date(
+                    category,
+                    date.fromisoformat(target_date),
+                    max_results,
+                )
                 total_papers += len(crawled)
                 store_result = self.papers.upsert_papers(category, crawled)
                 inserted += int(store_result["inserted"])
                 updated += int(store_result["updated"])
                 self._update_run_progress(run_id, total_papers=total_papers, inserted=inserted, updated=updated)
-                for item in crawled:
+                semaphore = asyncio.Semaphore(DAILY_PAPER_PIPELINE_CONCURRENCY)
+
+                async def process_item(item: dict) -> None:
+                    nonlocal completed
                     if self._is_cancelled(run_id):
-                        self._finish_cancelled_run(run_id, total_papers, completed, inserted, updated, errors)
                         return
-                    try:
-                        await self._process_daily_paper(run_id, target_date, category, item)
-                    except Exception as exc:
-                        errors.append(f"{category}/{item['arxiv_id']}: {_exc_text(exc)}")
-                    finally:
-                        completed += 1
-                        self._update_run_progress(
-                            run_id,
-                            total_papers=total_papers,
-                            completed=completed,
-                            inserted=inserted,
-                            updated=updated,
-                            error_message=errors[0] if errors else None,
-                        )
+                    async with semaphore:
+                        try:
+                            await self._process_daily_paper(run_id, target_date, category, item)
+                        except Exception as exc:
+                            async with progress_lock:
+                                errors.append(f"{category}/{item['arxiv_id']}: {_exc_text(exc)}")
+                        finally:
+                            async with progress_lock:
+                                completed += 1
+                                self._update_run_progress(
+                                    run_id,
+                                    total_papers=total_papers,
+                                    completed=completed,
+                                    inserted=inserted,
+                                    updated=updated,
+                                    error_message=errors[0] if errors else None,
+                                )
+
+                await asyncio.gather(*(process_item(item) for item in crawled))
+                if self._is_cancelled(run_id):
+                    self._finish_cancelled_run(run_id, total_papers, completed, inserted, updated, errors)
+                    return
             except Exception as exc:
                 errors.append(f"{category}: {_exc_text(exc)}")
 
@@ -379,20 +395,37 @@ class DailyPaperService:
 
     async def _process_daily_paper(self, run_id: int, target_date: str, category: str, arxiv_paper: dict) -> None:
         paper = self.papers.get_paper_by_arxiv_id(arxiv_paper["arxiv_id"])
+        existing = self._existing_daily_paper(target_date, category, paper["id"])
         storage_dir = self._storage_dir(target_date, category, paper["arxivId"])
         storage_dir.mkdir(parents=True, exist_ok=True)
         pdf_path = storage_dir / "source.pdf"
         markdown_path = storage_dir / "paper.md"
         await self._download_pdf(paper["pdfUrl"], pdf_path)
-        markdown = self._convert_pdf_to_markdown(pdf_path, paper)
-        markdown_path.write_text(markdown, encoding="utf-8")
-        self.papers.save_markdown_artifacts(paper["id"], markdown_path, storage_dir, markdown)
+        conversion_error = None
+        if existing and existing.get("markdown_path") and Path(existing["markdown_path"]).exists():
+            markdown = Path(existing["markdown_path"]).read_text(encoding="utf-8")
+        elif markdown_path.exists():
+            markdown = markdown_path.read_text(encoding="utf-8")
+        else:
+            markdown, conversion_error = await asyncio.to_thread(self._convert_pdf_to_markdown, pdf_path, paper)
+            markdown_path.write_text(markdown, encoding="utf-8")
+            self.papers.save_markdown_artifacts(paper["id"], markdown_path, storage_dir, markdown)
         rag_document_count = 0
         rag_error = None
-        try:
-            rag_document_count = self.rag.upsert_daily_paper(paper["id"], target_date, category, paper["title"], markdown)
-        except Exception as exc:
-            rag_error = _exc_text(exc)
+        if existing and int(existing.get("rag_document_count") or 0) > 0:
+            rag_document_count = int(existing["rag_document_count"])
+        else:
+            try:
+                rag_document_count = await asyncio.to_thread(
+                    self.rag.upsert_daily_paper,
+                    paper["id"],
+                    target_date,
+                    category,
+                    paper["title"],
+                    markdown,
+                )
+            except Exception as exc:
+                rag_error = _exc_text(exc)
         summaries = await self._summarize(paper, markdown)
         with transaction() as connection:
             connection.execute(
@@ -425,15 +458,15 @@ class DailyPaperService:
                     rag_document_count,
                 ),
             )
-            if rag_error:
+            if rag_error or conversion_error:
                 connection.execute(
                     """
                     UPDATE daily_papers
                     SET error_message = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE target_date = ? AND paper_id = ? AND category = ?
                     """,
-                    (rag_error, target_date, paper["id"], category),
-                    )
+                    (" | ".join([item for item in [conversion_error, rag_error] if item]), target_date, paper["id"], category),
+                )
 
     def _is_cancelled(self, run_id: int) -> bool:
         with transaction() as connection:
@@ -503,16 +536,18 @@ class DailyPaperService:
             response.raise_for_status()
             pdf_path.write_bytes(response.content)
 
-    def _convert_pdf_to_markdown(self, pdf_path: Path, paper: dict) -> str:
+    def _convert_pdf_to_markdown(self, pdf_path: Path, paper: dict) -> tuple[str, str | None]:
         try:
             from markitdown import MarkItDown
 
             result = MarkItDown().convert(str(pdf_path))
             content = getattr(result, "text_content", "") or str(result)
             if content.strip():
-                return content
-        except Exception:
-            pass
+                return content, None
+        except Exception as exc:
+            conversion_error = _exc_text(exc)
+        else:
+            conversion_error = "MarkItDown returned empty content"
         return (
             f"# {paper['title']}\n\n"
             f"- arXiv: {paper['arxivId']}\n"
@@ -520,7 +555,7 @@ class DailyPaperService:
             f"- Authors: {', '.join(paper['authors'])}\n\n"
             "## Abstract\n\n"
             f"{paper['abstract']}\n"
-        )
+        ), conversion_error
 
     async def _summarize(self, paper: dict, markdown: str) -> dict:
         content = markdown[: self.settings.daily_paper_summary_chars]
@@ -572,6 +607,16 @@ class DailyPaperService:
             "updatedAt": row["updated_at"],
             "finishedAt": row.get("finished_at"),
         }
+
+    def _existing_daily_paper(self, target_date: str, category: str, paper_id: int) -> dict | None:
+        with transaction() as connection:
+            return connection.execute(
+                """
+                SELECT * FROM daily_papers
+                WHERE target_date = ? AND category = ? AND paper_id = ?
+                """,
+                (target_date, category, paper_id),
+            ).fetchone()
 
     def _daily_paper_to_api(self, row: dict) -> dict:
         return {

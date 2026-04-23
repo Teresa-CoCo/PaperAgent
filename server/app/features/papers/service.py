@@ -169,7 +169,7 @@ class PaperService:
         errors: list[dict] = []
         for selected_category in self._crawl_categories(category):
             try:
-                papers = await self.arxiv.query_announced_new(selected_category)
+                papers = await self.fetch_papers_for_date(selected_category, date.today(), max_results)
                 self._merge_crawl_result(result, self._store_crawl_result(selected_category, papers))
             except httpx.HTTPError as exc:
                 errors.append({"category": selected_category, "error": str(exc)})
@@ -194,7 +194,7 @@ class PaperService:
                     announced_dates.append(current.isoformat())
                     for selected_category in self._crawl_categories(category):
                         try:
-                            papers = await self.arxiv.query_announced_new(selected_category)
+                            papers = await self.fetch_papers_for_date(selected_category, current, max_results)
                             self._merge_crawl_result(result, self._store_crawl_result(selected_category, papers))
                         except httpx.HTTPError as exc:
                             errors.append(
@@ -204,7 +204,7 @@ class PaperService:
                     fallback_dates.append(current.isoformat())
                     for selected_category in self._crawl_categories(category):
                         try:
-                            papers = await self.arxiv.query(selected_category, max_results, current, current)
+                            papers = await self.fetch_papers_for_date(selected_category, current, max_results)
                             self._merge_crawl_result(result, self._store_crawl_result(selected_category, papers))
                         except httpx.HTTPError as exc:
                             errors.append(
@@ -389,9 +389,9 @@ class PaperService:
         try:
             target_date = date.fromisoformat(step["target_date"]) if step.get("target_date") else None
             if step["source"] == "arxiv_new":
-                papers = await self.arxiv.query_announced_new(step["category"])
+                papers = await self.fetch_papers_for_date(step["category"], target_date or date.today(), self._job_max_results(job_id))
             else:
-                papers = await self.arxiv.query(step["category"], self._job_max_results(job_id), target_date, target_date)
+                papers = await self.fetch_papers_for_date(step["category"], target_date, self._job_max_results(job_id))
             result = self._store_crawl_result(step["category"], papers)
             self._mark_step_done(job_id, step_id, result)
         except httpx.HTTPError as exc:
@@ -440,6 +440,11 @@ class PaperService:
         with transaction() as connection:
             row = connection.execute("SELECT max_results FROM crawl_jobs WHERE id = ?", (job_id,)).fetchone()
         return int(row["max_results"]) if row else 20
+
+    async def fetch_papers_for_date(self, category: str, target_date: date | None, max_results: int = 20) -> list[dict]:
+        if target_date is None or target_date == date.today():
+            return await self.arxiv.query_announced_new(category, max_results=max_results, announced_date=target_date or date.today())
+        return await self.arxiv.query(category, max_results, target_date, target_date)
 
     def _mark_step_done(self, job_id: int, step_id: int, result: dict) -> None:
         with transaction() as connection:
