@@ -727,6 +727,56 @@ class PaperService:
         safe_category = category.replace("/", "_")
         return self.settings.storage_root / date.today().isoformat() / safe_category / str(paper_id)
 
+    def resolve_reusable_assets(self, paper_id: int) -> dict:
+        with transaction() as connection:
+            paper_row = connection.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
+            daily_row = connection.execute(
+                """
+                SELECT * FROM daily_papers
+                WHERE paper_id = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (paper_id,),
+            ).fetchone()
+
+        storage_dir = None
+        markdown_path = None
+        pdf_path = None
+
+        if paper_row:
+            storage_dir_value = paper_row.get("storage_dir")
+            if storage_dir_value:
+                candidate_dir = Path(storage_dir_value)
+                if candidate_dir.exists():
+                    storage_dir = candidate_dir
+                    candidate_pdf = candidate_dir / "source.pdf"
+                    if candidate_pdf.exists() and candidate_pdf.stat().st_size > 0:
+                        pdf_path = candidate_pdf
+            markdown_value = paper_row.get("markdown_path")
+            if markdown_value:
+                candidate_markdown = Path(markdown_value)
+                if candidate_markdown.exists():
+                    markdown_path = candidate_markdown
+                    storage_dir = storage_dir or candidate_markdown.parent
+
+        if daily_row and not storage_dir:
+            markdown_value = daily_row.get("markdown_path")
+            if markdown_value:
+                candidate_markdown = Path(markdown_value)
+                if candidate_markdown.exists():
+                    markdown_path = markdown_path or candidate_markdown
+                    storage_dir = candidate_markdown.parent
+                    candidate_pdf = candidate_markdown.parent / "source.pdf"
+                    if candidate_pdf.exists() and candidate_pdf.stat().st_size > 0:
+                        pdf_path = pdf_path or candidate_pdf
+
+        return {
+            "storage_dir": storage_dir,
+            "markdown_path": markdown_path,
+            "pdf_path": pdf_path,
+        }
+
     async def analyze(self, paper_id: int) -> dict:
         paper = self.get_paper(paper_id)
         markdown = paper.get("markdown") or paper.get("abstract", "")

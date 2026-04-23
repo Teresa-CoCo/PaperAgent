@@ -125,9 +125,10 @@ async def submit_ocr(paper_id: int, _: str = Depends(current_user_id)) -> dict:
     pdf_url = paper["pdfUrl"]
     if "arxiv.org/pdf/" in pdf_url and not pdf_url.endswith(".pdf"):
         pdf_url = f"https://arxiv.org/pdf/{paper['arxivId']}v{paper['version']}.pdf"
-    output_dir = paper_service.storage_dir_for(paper_id, paper["category"])
+    reusable = paper_service.resolve_reusable_assets(paper_id)
+    output_dir = reusable["storage_dir"] or paper_service.storage_dir_for(paper_id, paper["category"])
     output_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = output_dir / "source.pdf"
+    pdf_path = reusable["pdf_path"] or (output_dir / "source.pdf")
     if not pdf_path.exists() or pdf_path.stat().st_size == 0:
         try:
             async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -148,7 +149,8 @@ async def submit_ocr(paper_id: int, _: str = Depends(current_user_id)) -> dict:
 async def poll_ocr(paper_id: int, provider_job_id: str, _: str = Depends(current_user_id)) -> dict:
     paper_service = PaperService()
     paper = paper_service.get_paper(paper_id)
-    output_dir = paper_service.storage_dir_for(paper_id, paper["category"])
+    reusable = paper_service.resolve_reusable_assets(paper_id)
+    output_dir = reusable["storage_dir"] or paper_service.storage_dir_for(paper_id, paper["category"])
     return await PaddleOCRTool().poll_and_store(paper_id, provider_job_id, output_dir)
 
 

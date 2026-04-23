@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from collections.abc import Sequence
 from datetime import date, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from app.features.users.service import ensure_user
 
 
 _daily_queue_lock = asyncio.Lock()
+_run_item_tasks: dict[int, set[asyncio.Task]] = {}
 DAILY_PAPER_PIPELINE_CONCURRENCY = 2
 
 
@@ -42,6 +44,7 @@ class DailyPaperRAGStore:
         self.settings = get_settings()
         self._collection = None
         self._embedder = None
+        self._embedder_lock = threading.Lock()
 
     def _embedding_function(self):
         if self._embedder is not None:
@@ -113,6 +116,18 @@ class DailyPaperRAGStore:
         )
         return self._collection
 
+    def _get_plain_collection(self):
+        try:
+            import chromadb
+        except Exception as exc:
+            raise AppError(
+                f"ChromaDB is not installed: {exc}",
+                500,
+                "chromadb_unavailable",
+            ) from exc
+        client = chromadb.PersistentClient(path=str(self.settings.rag_chroma_path))
+        return client.get_collection(self.settings.rag_collection_name)
+
     def upsert_daily_paper(
         self,
         paper_id: int,
@@ -121,24 +136,33 @@ class DailyPaperRAGStore:
         title: str,
         markdown: str,
     ) -> int:
-        collection = self._get_collection()
-        chunks = self._chunk_markdown(markdown)
-        if not chunks:
-            return 0
-        base = f"{target_date}:{category}:{paper_id}"
-        ids = [f"{base}:{index}" for index in range(len(chunks))]
-        metadatas = [
-            {
-                "paper_id": paper_id,
-                "target_date": target_date,
-                "category": category,
-                "title": title,
-                "chunk_index": index,
-            }
-            for index in range(len(chunks))
-        ]
-        collection.upsert(ids=ids, documents=chunks, metadatas=metadatas)
-        return len(chunks)
+        with self._embedder_lock:
+            collection = self._get_collection()
+            chunks = self._chunk_markdown(markdown)
+            if not chunks:
+                return 0
+            base = f"{target_date}:{category}:{paper_id}"
+            ids = [f"{base}:{index}" for index in range(len(chunks))]
+            metadatas = [
+                {
+                    "paper_id": paper_id,
+                    "target_date": target_date,
+                    "category": category,
+                    "title": title,
+                    "chunk_index": index,
+                }
+                for index in range(len(chunks))
+            ]
+            collection.upsert(ids=ids, documents=chunks, metadatas=metadatas)
+            return len(chunks)
+
+    def delete_daily_paper(self, paper_id: int, target_date: str, category: str) -> None:
+        with self._embedder_lock:
+            collection = self._get_plain_collection()
+            data = collection.get(where={"$and": [{"target_date": target_date}, {"category": category}, {"paper_id": paper_id}]})
+            ids = data.get("ids", [])
+            if ids:
+                collection.delete(ids=ids)
 
     def _chunk_markdown(self, markdown: str, chunk_size: int = 1400, overlap: int = 160) -> list[str]:
         text = markdown.strip()
@@ -220,7 +244,7 @@ class DailyPaperService:
                 """
                 UPDATE daily_paper_runs
                 SET status = 'cancelled',
-                    error_message = COALESCE(NULLIF(error_message, ''), 'Stopped by user'),
+                    error_message = 'Stopped by user',
                     updated_at = CURRENT_TIMESTAMP,
                     finished_at = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -228,6 +252,9 @@ class DailyPaperService:
                 (run_id,),
             )
             cancelled = connection.execute("SELECT * FROM daily_paper_runs WHERE id = ?", (run_id,)).fetchone()
+        for task in list(_run_item_tasks.get(run_id, set())):
+            task.cancel()
+        self._cleanup_cancelled_run(run_id)
         return self._run_to_api(cancelled)
 
     def list_daily_papers(self, target_date: str | None = None, categories: Sequence[str] | None = None) -> list[dict]:
@@ -362,7 +389,12 @@ class DailyPaperService:
                                     error_message=errors[0] if errors else None,
                                 )
 
-                await asyncio.gather(*(process_item(item) for item in crawled))
+                tasks = [asyncio.create_task(process_item(item)) for item in crawled]
+                _run_item_tasks[run_id] = set(tasks)
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                finally:
+                    _run_item_tasks.pop(run_id, None)
                 if self._is_cancelled(run_id):
                     self._finish_cancelled_run(run_id, total_papers, completed, inserted, updated, errors)
                     return
@@ -396,13 +428,18 @@ class DailyPaperService:
     async def _process_daily_paper(self, run_id: int, target_date: str, category: str, arxiv_paper: dict) -> None:
         paper = self.papers.get_paper_by_arxiv_id(arxiv_paper["arxiv_id"])
         existing = self._existing_daily_paper(target_date, category, paper["id"])
+        reusable = self.papers.resolve_reusable_assets(paper["id"])
         storage_dir = self._storage_dir(target_date, category, paper["arxivId"])
         storage_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = storage_dir / "source.pdf"
+        pdf_path = reusable["pdf_path"] or (storage_dir / "source.pdf")
         markdown_path = storage_dir / "paper.md"
         await self._download_pdf(paper["pdfUrl"], pdf_path)
         conversion_error = None
-        if existing and existing.get("markdown_path") and Path(existing["markdown_path"]).exists():
+        if reusable["markdown_path"] and Path(reusable["markdown_path"]).exists():
+            markdown = Path(reusable["markdown_path"]).read_text(encoding="utf-8")
+            markdown_path = Path(reusable["markdown_path"])
+            storage_dir = markdown_path.parent
+        elif existing and existing.get("markdown_path") and Path(existing["markdown_path"]).exists():
             markdown = Path(existing["markdown_path"]).read_text(encoding="utf-8")
         elif markdown_path.exists():
             markdown = markdown_path.read_text(encoding="utf-8")
@@ -498,6 +535,7 @@ class DailyPaperService:
                 """,
                 (total_papers, completed, inserted, updated, "\n".join(errors[:8]) if errors else "Stopped by user", run_id),
             )
+        self._cleanup_cancelled_run(run_id)
 
     def _update_run_progress(
         self,
@@ -617,6 +655,87 @@ class DailyPaperService:
                 """,
                 (target_date, category, paper_id),
             ).fetchone()
+
+    def _cleanup_cancelled_run(self, run_id: int) -> None:
+        with transaction() as connection:
+            run = connection.execute("SELECT * FROM daily_paper_runs WHERE id = ?", (run_id,)).fetchone()
+            if not run:
+                return
+            rows = connection.execute(
+                """
+                SELECT d.*, p.created_at AS paper_created_at, p.markdown_path AS paper_markdown_path, p.storage_dir AS paper_storage_dir
+                FROM daily_papers d
+                JOIN papers p ON p.id = d.paper_id
+                WHERE d.run_id = ?
+                """,
+                (run_id,),
+            ).fetchall()
+
+        daily_root = (self.settings.storage_root / "daily-paper").resolve()
+        deleted_paper_ids: set[int] = set()
+
+        for row in rows:
+            try:
+                self.rag.delete_daily_paper(int(row["paper_id"]), row["target_date"], row["category"])
+            except Exception:
+                pass
+
+            markdown_path_value = row.get("markdown_path")
+            if markdown_path_value:
+                markdown_path = Path(markdown_path_value)
+                try:
+                    resolved = markdown_path.resolve()
+                    if daily_root in resolved.parents:
+                        storage_dir = resolved.parent
+                        if storage_dir.exists():
+                            for child in sorted(storage_dir.glob("**/*"), reverse=True):
+                                if child.is_file():
+                                    child.unlink(missing_ok=True)
+                            for child in sorted(storage_dir.glob("**/*"), reverse=True):
+                                if child.is_dir():
+                                    child.rmdir()
+                            storage_dir.rmdir()
+                except Exception:
+                    pass
+
+            with transaction() as connection:
+                connection.execute("DELETE FROM daily_papers WHERE id = ?", (row["id"],))
+
+                paper_id = int(row["paper_id"])
+                paper_row = connection.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
+                if not paper_row:
+                    continue
+
+                current_markdown = paper_row.get("markdown_path")
+                if current_markdown == markdown_path_value:
+                    connection.execute(
+                        "UPDATE papers SET markdown_path = NULL, storage_dir = NULL WHERE id = ?",
+                        (paper_id,),
+                    )
+                    connection.execute("DELETE FROM paper_chunks WHERE paper_id = ?", (paper_id,))
+                    connection.execute("DELETE FROM paper_chunks_fts WHERE paper_id = ?", (paper_id,))
+
+                other_refs = connection.execute(
+                    "SELECT COUNT(*) AS count FROM daily_papers WHERE paper_id = ?",
+                    (paper_id,),
+                ).fetchone()["count"]
+                favorite_refs = connection.execute(
+                    "SELECT COUNT(*) AS count FROM paper_favorites WHERE paper_id = ?",
+                    (paper_id,),
+                ).fetchone()["count"]
+                chat_refs = connection.execute(
+                    "SELECT COUNT(*) AS count FROM chat_sessions WHERE paper_id = ?",
+                    (paper_id,),
+                ).fetchone()["count"]
+
+                if other_refs or favorite_refs or chat_refs:
+                    continue
+
+                paper_created_at = paper_row.get("created_at")
+                run_created_at = run.get("created_at")
+                if paper_created_at and run_created_at and paper_created_at >= run_created_at:
+                    connection.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
+                    deleted_paper_ids.add(paper_id)
 
     def _daily_paper_to_api(self, row: dict) -> dict:
         return {
