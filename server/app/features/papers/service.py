@@ -798,7 +798,7 @@ class PaperService:
             "paper-analysis",
             [ChatMessage("system", system), ChatMessage("user", prompt)],
         )
-        parsed = self._parse_analysis(response)
+        parsed = self._parse_analysis(response.content)
         with transaction() as connection:
             connection.execute(
                 """
@@ -878,4 +878,4 @@ class PaperService:
             ),
         ]
         translated = await self.llm.complete("selection-translation", messages)
-        return {"translation": translated}
+        return {"translation": translated.content}

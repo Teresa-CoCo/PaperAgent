@@ -645,14 +645,15 @@ class DailyPaperService:
                 ),
             ],
         )
+        result_text = response.content
         try:
-            start = response.index("{")
-            end = response.rindex("}") + 1
-            parsed = json.loads(response[start:end])
+            start = result_text.index("{")
+            end = result_text.rindex("}") + 1
+            parsed = json.loads(result_text[start:end])
         except (ValueError, json.JSONDecodeError):
             parsed = {
                 "short_summary": (paper["abstract"] or paper["title"])[:120],
-                "long_summary": response[:4000] or paper["abstract"],
+                "long_summary": result_text[:4000] or paper["abstract"],
             }
         parsed.setdefault("short_summary", (paper["abstract"] or paper["title"])[:120])
         parsed.setdefault("long_summary", paper["abstract"])

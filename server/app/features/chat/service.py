@@ -161,8 +161,10 @@ class ChatService:
                     text_chunks = self._accumulate_text(event, text_chunks)
                     yield event + "\n"
         except Exception as exc:
-            error_event = json.dumps({"type": "error", "message": f"{exc.__class__.__name__}: {str(exc) or '外部服务连接失败'}"}, ensure_ascii=False)
-            text_chunks.append(f"\n[生成中断] {exc.__class__.__name__}: {str(exc) or '外部服务连接失败'}")
+            user_message = self._user_facing_error(exc)
+            error_event = json.dumps({"type": "error", "message": user_message}, ensure_ascii=False)
+            if not text_chunks:
+                text_chunks.append(user_message)
             yield error_event + "\n"
 
         answer = "".join(text_chunks)
@@ -254,8 +256,18 @@ class ChatService:
 
             if not response.tool_calls:
                 if response.content:
-                    messages.append(ChatMessage("assistant", response.content))
+                    messages.append(ChatMessage(role="assistant", content=response.content))
                 break
+
+            # Build assistant message with tool_calls
+            messages.append(ChatMessage(
+                role="assistant",
+                content=response.content or "",
+                tool_calls=[
+                    {"id": t.id, "type": "function", "function": t.function}
+                    for t in response.tool_calls
+                ],
+            ))
 
             for tc in response.tool_calls:
                 func_name = tc.function["name"]
@@ -295,11 +307,11 @@ class ChatService:
                                 "name": func_name,
                                 "summary": "⚠️ Command execution denied by user",
                             }, ensure_ascii=False)
-                            messages.append(ChatMessage("tool", json.dumps({
-                                "tool_call_id": tc.id,
-                                "name": func_name,
-                                "result": {"status": "denied", "command": command},
-                            }, ensure_ascii=False)))
+                            messages.append(ChatMessage(
+                                role="tool",
+                                content=json.dumps({"status": "denied", "command": command}, ensure_ascii=False),
+                                tool_call_id=tc.id,
+                            ))
                             continue
 
                 # Execute tool
@@ -317,20 +329,18 @@ class ChatService:
                     "summary": summary,
                 }, ensure_ascii=False)
 
-                messages.append(ChatMessage("assistant", response.content or ""))
-                messages.append(
-                    ChatMessage("tool", json.dumps({
-                        "tool_call_id": tc.id,
-                        "name": func_name,
-                        "result": parsed_result,
-                    }, ensure_ascii=False))
-                )
+                messages.append(ChatMessage(
+                    role="tool",
+                    content=json.dumps(parsed_result, ensure_ascii=False),
+                    tool_call_id=tc.id,
+                ))
         else:
             msg = "工具调用次数已达上限，基于已有信息回答。"
             messages.append(ChatMessage("assistant", msg))
 
-        # Stream the final answer
-        final_messages = [m for m in messages if m.role in ("system", "user", "assistant")][-10:]
+        # Stream the final answer. Keep tool-call assistant messages paired with their
+        # tool responses, otherwise providers like DeepSeek reject the request.
+        final_messages = messages
         async for chunk in self.llm.stream(final_messages):
             yield json.dumps({"type": "text", "content": chunk}, ensure_ascii=False)
         yield json.dumps({"type": "done"})
@@ -351,12 +361,21 @@ class ChatService:
             if not response.tool_calls:
                 return response.content
 
+            messages.append(ChatMessage(
+                role="assistant",
+                content=response.content or "",
+                tool_calls=[
+                    {"id": t.id, "type": "function", "function": t.function}
+                    for t in response.tool_calls
+                ],
+            ))
             for tc in response.tool_calls:
                 tool_result = await execute_tool(tc.function["name"], tc.function["arguments"], ctx)
-                messages.append(ChatMessage("assistant", response.content or ""))
-                messages.append(
-                    ChatMessage("tool", json.dumps({"tool_call_id": tc.id, "name": tc.function["name"], "result": json.loads(tool_result)}, ensure_ascii=False))
-                )
+                messages.append(ChatMessage(
+                    role="tool",
+                    content=tool_result,
+                    tool_call_id=tc.id,
+                ))
         return "工具调用次数已达上限，基于已有信息回答。"
 
     def _ace_initial_messages(self, user_id: str, message: str) -> list[ChatMessage]:
@@ -373,7 +392,8 @@ class ChatService:
                     "3. web_search — 通过 Brave 搜索实时网络信息\n"
                     "4. arxiv_search — 直接搜索 arXiv 获取最新论文\n"
                     "5. add_to_favorites — 将论文收藏到指定文件夹（自动创建文件夹）\n"
-                    "6. list_favorite_folders — 列出所有收藏文件夹\n\n"
+                    "6. list_favorite_folders — 列出所有收藏文件夹\n"
+                    "7. shell_execute — 执行安全的 shell 命令（危险命令需用户批准）\n\n"
                     "工作原则：\n"
                     "- 可以同时调用多个工具以加速（如同时搜索数据库和 arXiv）\n"
                     "- 多步任务可以连续调用不同工具（如先搜索→再收藏）\n"
@@ -417,6 +437,14 @@ class ChatService:
             added = result.get("added", 0)
             return f"已收藏 {added} 篇论文到「{result.get('folder_name', '')}」"
         return f"工具 {name} 执行完成"
+
+    def _user_facing_error(self, exc: Exception) -> str:
+        message = str(exc).strip()
+        if exc.__class__.__name__ == "HTTPStatusError":
+            return "模型服务请求失败，Ace Chat 本轮没有生成结果。已修正工具调用链后请重试；如果仍失败，请检查 LLM 接口配置。"
+        if message:
+            return f"生成失败：{message}"
+        return "生成失败：外部服务连接异常"
 
     @staticmethod
     def approve_tool_call(tool_call_id: str, approved: bool) -> bool:

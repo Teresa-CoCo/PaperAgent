@@ -1,5 +1,7 @@
 import hashlib
 import json
+import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +16,19 @@ from app.db.connection import transaction
 class ChatMessage:
     role: str
     content: str
+    tool_calls: list[dict] | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
+
+    def to_api_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"role": self.role, "content": self.content}
+        if self.tool_calls is not None:
+            d["tool_calls"] = self.tool_calls
+        if self.tool_call_id is not None:
+            d["tool_call_id"] = self.tool_call_id
+        if self.name is not None:
+            d["name"] = self.name
+        return d
 
 
 @dataclass
@@ -53,6 +68,53 @@ class LLMClient:
                 (cache_key, response_text),
             )
 
+    def _parse_dsml_tool_calls(self, content: str) -> tuple[str, list[ToolCall] | None]:
+        if "<｜DSML｜tool_calls>" not in content:
+            return content, None
+
+        invoke_pattern = re.compile(
+            r"<｜DSML｜invoke\s+name=\"(?P<name>[^\"]+)\">(?P<body>.*?)</｜DSML｜invoke>",
+            flags=re.S,
+        )
+        param_pattern = re.compile(
+            r"<｜DSML｜parameter\s+name=\"(?P<name>[^\"]+)\"\s+string=\"(?P<string>true|false)\">(?P<value>.*?)</｜DSML｜parameter>",
+            flags=re.S,
+        )
+
+        tool_calls: list[ToolCall] = []
+        for invoke_index, invoke_match in enumerate(invoke_pattern.finditer(content), start=1):
+            arguments: dict[str, Any] = {}
+            for param_match in param_pattern.finditer(invoke_match.group("body")):
+                raw_value = param_match.group("value").strip()
+                is_string = param_match.group("string") == "true"
+                if is_string:
+                    value: Any = raw_value
+                else:
+                    try:
+                        value = json.loads(raw_value)
+                    except json.JSONDecodeError:
+                        lowered = raw_value.lower()
+                        if lowered == "true":
+                            value = True
+                        elif lowered == "false":
+                            value = False
+                        else:
+                            value = raw_value
+                arguments[param_match.group("name")] = value
+
+            tool_calls.append(
+                ToolCall(
+                    id=f"dsml-{invoke_index}-{uuid.uuid4().hex[:12]}",
+                    function={
+                        "name": invoke_match.group("name"),
+                        "arguments": json.dumps(arguments, ensure_ascii=False),
+                    },
+                )
+            )
+
+        cleaned = re.sub(r"<｜DSML｜tool_calls>.*?</｜DSML｜tool_calls>", "", content, flags=re.S).strip()
+        return cleaned, tool_calls or None
+
     async def complete(
         self,
         task: str,
@@ -62,7 +124,7 @@ class LLMClient:
     ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.settings.llm_model,
-            "messages": [message.__dict__ for message in messages],
+            "messages": [m.to_api_dict() for m in messages],
             "temperature": 0.2,
         }
         if tools:
@@ -95,7 +157,7 @@ class LLMClient:
                     headers=headers,
                     json={
                         "model": self.settings.llm_model,
-                        "input": [message.__dict__ for message in messages],
+                        "input": [m.to_api_dict() for m in messages],
                     },
                 )
                 response.raise_for_status()
@@ -125,6 +187,8 @@ class LLMClient:
                         function={"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]},
                     )
                 )
+        elif tools and response_text:
+            response_text, tool_calls = self._parse_dsml_tool_calls(response_text)
 
         if use_cache and not tool_calls:
             self._write_cache(cache_key, response_text)
@@ -144,7 +208,7 @@ class LLMClient:
         }
         payload = {
             "model": self.settings.llm_model,
-            "messages": [message.__dict__ for message in messages],
+            "messages": [m.to_api_dict() for m in messages],
             "temperature": 0.2,
             "stream": True,
         }
