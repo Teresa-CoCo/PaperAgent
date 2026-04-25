@@ -1,6 +1,22 @@
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const USER_ID = import.meta.env.VITE_USER_ID || "local-user";
 
+export type StreamEvent =
+  | { type: "text"; content: string }
+  | { type: "tool_start"; toolCallId: string; name: string; arguments: string }
+  | { type: "tool_result"; toolCallId: string; name: string; summary: string }
+  | { type: "approval"; toolCallId: string; command: string; reason: string }
+  | { type: "done" }
+  | { type: "error"; message: string };
+
+export type ToolCallInfo = {
+  toolCallId: string;
+  name: string;
+  arguments: string;
+  status: "running" | "success" | "error" | "denied";
+  summary?: string;
+};
+
 export type Paper = {
   id: number;
   arxivId: string;
@@ -243,18 +259,10 @@ export const api = {
     }),
   listSessions: () => request<{ items: ChatSession[] }>("/api/chat/sessions"),
   listMessages: (sessionId: string) => request<{ items: ChatMessage[] }>(`/api/chat/sessions/${sessionId}/messages`),
-  sendMessage: (
-    sessionId: string,
-    payload: { message: string; paperId?: number; selection?: string; mode: "paper" | "ace" }
-  ) =>
-    request<{ answer: string; messages: ChatMessage[] }>(`/api/chat/sessions/${sessionId}/messages`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }),
   streamMessage: async (
     sessionId: string,
     payload: { message: string; paperId?: number; selection?: string; mode: "paper" | "ace" },
-    onChunk: (chunk: string) => void
+    onEvent: (event: StreamEvent) => void
   ) => {
     const response = await fetch(`${API_BASE_URL}/api/chat/sessions/${sessionId}/stream`, {
       method: "POST",
@@ -270,12 +278,34 @@ export const api = {
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
+    let buffer = "";
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-      onChunk(decoder.decode(value, { stream: true }));
+      if (done) {
+        const remaining = buffer.trim();
+        if (remaining) onEvent({ type: "text", content: remaining });
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const event = JSON.parse(trimmed) as StreamEvent;
+          onEvent(event);
+        } catch {
+          onEvent({ type: "text", content: trimmed });
+        }
+      }
     }
   },
+  approveToolCall: (sessionId: string, toolCallId: string, approved: boolean) =>
+    request<{ status: string }>(`/api/chat/sessions/${sessionId}/tools/${toolCallId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ approved })
+    }),
   recommendations: () => request<{ items: Paper[] }>("/api/users/recommendations"),
   settings: () => request<UserSettings>("/api/users/settings"),
   updatePreferenceText: (text: string) =>

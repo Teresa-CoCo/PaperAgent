@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { API_BASE_URL, type Paper } from "../lib/api";
-import { GlassPanel } from "./GlassPanel";
+import { Panel } from "./Panel";
 import { MarkdownText } from "./MarkdownText";
 
 type Props = {
@@ -38,11 +38,11 @@ export function PaperViewer({
 
   if (!paper) {
     return (
-      <GlassPanel className="panel viewer empty-viewer">
+      <Panel className="viewer empty-viewer">
         <img src="/assets/paper-signal.svg" alt="" />
         <h2>选择一篇论文开始阅读</h2>
         <p>摘要、Markdown、PDF 与划线问答会在这里展开。</p>
-      </GlassPanel>
+      </Panel>
     );
   }
 
@@ -59,7 +59,7 @@ export function PaperViewer({
   };
 
   return (
-    <GlassPanel className="panel viewer">
+    <Panel className="viewer">
       <header className="viewer-header">
         <div>
           <p className="eyebrow">{paper.arxivId} · {paper.category}</p>
@@ -157,6 +157,6 @@ export function PaperViewer({
           {translation}
         </MarkdownText>
       )}
-    </GlassPanel>
+    </Panel>
   );
 }

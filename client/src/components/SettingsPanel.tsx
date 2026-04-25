@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { GlassPanel } from "./GlassPanel";
+import { Panel } from "./Panel";
 import { api, type Paper, type UserSettings } from "../lib/api";
 
 type Props = {
@@ -87,7 +87,7 @@ export function SettingsPanel({ activePaper, onPaperDeleted, onDatabaseChanged }
   }
 
   return (
-    <GlassPanel className="panel settings-panel">
+    <Panel className="settings-panel">
       <header className="settings-header">
         <div>
           <p className="eyebrow">Settings</p>
@@ -127,8 +127,8 @@ export function SettingsPanel({ activePaper, onPaperDeleted, onDatabaseChanged }
           <button onClick={clearChatMemory} disabled={loading}>清理聊天记录</button>
         </section>
 
-        {message && <p className="status-pill">{message}</p>}
+        {message && <p className="status-pill message-pill">{message}</p>}
       </div>
-    </GlassPanel>
+    </Panel>
   );
 }

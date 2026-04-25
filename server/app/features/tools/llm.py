@@ -1,6 +1,7 @@
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 from collections.abc import AsyncIterator
@@ -13,6 +14,18 @@ from app.db.connection import transaction
 class ChatMessage:
     role: str
     content: str
+
+
+@dataclass
+class ToolCall:
+    id: str
+    function: dict  # {"name": str, "arguments": str}
+
+
+@dataclass
+class LLMResponse:
+    content: str
+    tool_calls: list[ToolCall] | None = None
 
 
 class LLMClient:
@@ -40,20 +53,28 @@ class LLMClient:
                 (cache_key, response_text),
             )
 
-    async def complete(self, task: str, messages: list[ChatMessage], use_cache: bool = True) -> str:
-        payload = {
+    async def complete(
+        self,
+        task: str,
+        messages: list[ChatMessage],
+        use_cache: bool = True,
+        tools: list[dict] | None = None,
+    ) -> LLMResponse:
+        payload: dict[str, Any] = {
             "model": self.settings.llm_model,
             "messages": [message.__dict__ for message in messages],
             "temperature": 0.2,
         }
+        if tools:
+            payload["tools"] = tools
+
         cache_key = self._cache_key(task, payload)
-        if use_cache:
+        if use_cache and not tools:
             cached = self._read_cache(cache_key)
             if cached:
-                return cached
+                return LLMResponse(content=cached)
 
         if not self.settings.llm_api_key:
-            # Deterministic local fallback keeps the app useful before API keys are configured.
             joined = "\n".join(message.content for message in messages[-2:])
             response_text = (
                 "LLM API key is not configured. Local fallback summary:\n"
@@ -61,13 +82,13 @@ class LLMClient:
             )
             if use_cache:
                 self._write_cache(cache_key, response_text)
-            return response_text
+            return LLMResponse(content=response_text)
 
         headers = {
             "Authorization": f"Bearer {self.settings.llm_api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             if self.settings.llm_interface == "responses":
                 response = await client.post(
                     f"{self.settings.llm_base_url.rstrip('/')}/v1/responses",
@@ -79,20 +100,36 @@ class LLMClient:
                 )
                 response.raise_for_status()
                 data = response.json()
-                response_text = data.get("output_text") or json.dumps(data, ensure_ascii=False)
-            else:
-                response = await client.post(
-                    f"{self.settings.llm_base_url.rstrip('/')}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-                response_text = data["choices"][0]["message"]["content"]
+                return LLMResponse(content=data.get("output_text") or json.dumps(data, ensure_ascii=False))
 
-        if use_cache:
+            response = await client.post(
+                f"{self.settings.llm_base_url.rstrip('/')}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            choice = data["choices"][0]
+            msg = choice.get("message", {})
+
+        response_text = msg.get("content") or ""
+        raw_tool_calls = msg.get("tool_calls")
+
+        tool_calls = None
+        if raw_tool_calls:
+            tool_calls = []
+            for tc in raw_tool_calls:
+                tool_calls.append(
+                    ToolCall(
+                        id=tc["id"],
+                        function={"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]},
+                    )
+                )
+
+        if use_cache and not tool_calls:
             self._write_cache(cache_key, response_text)
-        return response_text
+
+        return LLMResponse(content=response_text, tool_calls=tool_calls)
 
     async def stream(self, messages: list[ChatMessage]) -> AsyncIterator[str]:
         if not self.settings.llm_api_key:

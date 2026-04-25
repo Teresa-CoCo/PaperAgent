@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import threading
 from collections.abc import Sequence
 from datetime import date, timedelta
@@ -55,11 +56,24 @@ class DailyPaperRAGStore:
             import torch.nn.functional as F
             from transformers import AutoModel, AutoTokenizer
 
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left", trust_remote_code=True)
-            model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                padding_side="left",
+                trust_remote_code=True,
+                local_files_only=True,
+            )
+            model_kwargs = {"trust_remote_code": True}
+            if device == "cuda":
+                model_kwargs["torch_dtype"] = torch.float16
+            model_kwargs["local_files_only"] = True
+            model = AutoModel.from_pretrained(model_name, **model_kwargs)
             model.to(device)
             model.eval()
+            max_length = self.settings.rag_embedding_max_length
 
             def last_token_pool(last_hidden_states, attention_mask):
                 left_padding = attention_mask[:, -1].sum() == attention_mask.shape[0]
@@ -74,19 +88,35 @@ class DailyPaperRAGStore:
 
             class TransformersEmbedding:
                 def __call__(self, input: list[str]) -> list[list[float]]:
-                    batch_dict = tokenizer(
-                        input,
-                        padding=True,
-                        truncation=True,
-                        max_length=8192,
-                        return_tensors="pt",
-                    )
-                    batch_dict = {key: value.to(device) for key, value in batch_dict.items()}
-                    with torch.no_grad():
-                        outputs = model(**batch_dict)
-                    embeddings = last_token_pool(outputs.last_hidden_state, batch_dict["attention_mask"])
-                    embeddings = F.normalize(embeddings, p=2, dim=1)
-                    return embeddings.cpu().tolist()
+                    results: list[list[float]] = []
+                    for text in input:
+                        batch_dict = tokenizer(
+                            [text],
+                            padding=True,
+                            truncation=True,
+                            max_length=max_length,
+                            return_tensors="pt",
+                        )
+                        try:
+                            batch_dict = {key: value.to(device) for key, value in batch_dict.items()}
+                            with torch.no_grad():
+                                outputs = model(**batch_dict)
+                            embeddings = last_token_pool(outputs.last_hidden_state, batch_dict["attention_mask"])
+                        except torch.OutOfMemoryError:
+                            if device != "cuda":
+                                raise
+                            torch.cuda.empty_cache()
+                            cpu_batch = {key: value.to("cpu") for key, value in batch_dict.items()}
+                            model_cpu = model.to("cpu")
+                            with torch.no_grad():
+                                outputs = model_cpu(**cpu_batch)
+                            embeddings = last_token_pool(outputs.last_hidden_state, cpu_batch["attention_mask"])
+                            model_cpu.to(device)
+                        embeddings = F.normalize(embeddings, p=2, dim=1)
+                        results.extend(embeddings.cpu().tolist())
+                        if device == "cuda":
+                            torch.cuda.empty_cache()
+                    return results
 
             self._embedder = TransformersEmbedding()
             return self._embedder

@@ -1,5 +1,5 @@
 import type { Paper } from "../lib/api";
-import { GlassPanel } from "./GlassPanel";
+import { Panel } from "./Panel";
 import { MarkdownText } from "./MarkdownText";
 
 type Props = {
@@ -40,7 +40,7 @@ export function PaperList({
   const selectedSet = new Set(selectedPaperIds);
 
   return (
-    <GlassPanel className="panel paper-list-panel">
+    <Panel className="paper-list-panel">
       <section className="paper-list">
         <div className="list-toolbar">
           <div>
@@ -123,6 +123,6 @@ export function PaperList({
           ))}
         </div>
       </section>
-    </GlassPanel>
+    </Panel>
   );
 }

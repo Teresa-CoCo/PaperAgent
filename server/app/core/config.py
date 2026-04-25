@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     rag_chroma_path: Path = Path("./data/chroma")
     rag_collection_name: str = "daily_paper_chunks"
     rag_embedding_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
+    rag_embedding_max_length: int = 2048
 
     @staticmethod
     def csv_list(value: str) -> list[str]:

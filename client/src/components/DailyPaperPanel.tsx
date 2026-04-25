@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { GlassPanel } from "./GlassPanel";
+import { Panel } from "./Panel";
 import { MarkdownText } from "./MarkdownText";
 import type { DailyPaperEntry, DailyPaperRun } from "../lib/api";
 
@@ -64,7 +64,7 @@ export function DailyPaperPanel({
   }
 
   return (
-    <GlassPanel className="panel daily-paper-panel">
+    <Panel className="daily-paper-panel">
       <div className="daily-paper-shell">
         <header className="daily-paper-header">
           <div>
@@ -122,7 +122,7 @@ export function DailyPaperPanel({
                     <span>{run.status}</span>
                   </div>
                   <p>{run.categories.join(", ")}</p>
-                  <div className="quota-track">
+                  <div className="progress-track">
                     <span style={{ width: `${ratio}%` }} />
                   </div>
                   <p>{run.completedPapers}/{run.totalPapers} 篇 · 新增 {run.inserted} · 更新 {run.updated}</p>
@@ -153,7 +153,8 @@ export function DailyPaperPanel({
         )}
 
         {!loading && entries.length > 0 && (
-          <section className="daily-summary-block digest-block">
+          <section className="daily-digest-wrap">
+            <section className="daily-summary-block digest-block">
             <div className="daily-summary-head">
               <strong>当日全部文章缩略汇总</strong>
               <button onClick={() => setDigestExpanded((value) => !value)}>
@@ -168,6 +169,7 @@ export function DailyPaperPanel({
                 {digestMarkdown}
               </MarkdownText>
             )}
+            </section>
           </section>
         )}
 
@@ -226,6 +228,6 @@ export function DailyPaperPanel({
           })}
         </section>
       </div>
-    </GlassPanel>
+    </Panel>
   );
 }

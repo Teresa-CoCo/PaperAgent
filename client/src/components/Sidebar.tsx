@@ -1,5 +1,5 @@
 import { CalendarPicker } from "./CalendarPicker";
-import { GlassPanel } from "./GlassPanel";
+import { Panel } from "./Panel";
 import type { CrawlJob, DateFilter, FavoriteFolder, OcrQuota } from "../lib/api";
 
 export type LibraryMode = "all" | "parsed" | "favorites" | "recommendations" | "daily" | "settings";
@@ -56,10 +56,12 @@ export function Sidebar({
   };
 
   return (
-    <GlassPanel className={`panel sidebar ${collapsed ? "is-collapsed" : ""}`}>
-      <button className="icon-button" onClick={onToggle} aria-label="折叠左侧栏目">
-        {collapsed ? ">" : "<"}
-      </button>
+    <Panel className={`sidebar ${collapsed ? "is-collapsed" : ""}`}>
+      <div className="sidebar-toggle">
+        <button onClick={onToggle} aria-label="折叠左侧栏目">
+          {collapsed ? "→" : "←"}
+        </button>
+      </div>
       {!collapsed && (
         <div className="sidebar-content">
           <div className="brand-block">
@@ -87,7 +89,7 @@ export function Sidebar({
                       <strong title={`#${job.id} ${job.category}`}>#{job.id} {job.category === "all" ? "全部分类" : job.category}</strong>
                       <span>{job.status}</span>
                     </div>
-                    <div className="quota-track">
+                    <div className="progress-track">
                       <span style={{ width: `${ratio}%` }} />
                     </div>
                     <p>
@@ -173,6 +175,6 @@ export function Sidebar({
           </section>
         </div>
       )}
-    </GlassPanel>
+    </Panel>
   );
 }

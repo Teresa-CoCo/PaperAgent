@@ -1,11 +1,11 @@
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatPanel } from "./components/ChatPanel";
 import { DailyPaperPanel } from "./components/DailyPaperPanel";
 import { PaperList } from "./components/PaperList";
 import { PaperViewer } from "./components/PaperViewer";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar, type LibraryMode } from "./components/Sidebar";
-import { api, type ChatMessage, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper } from "./lib/api";
+import { api, type ChatMessage, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper, type StreamEvent, type ToolCallInfo } from "./lib/api";
 
 type ViewMode = "summary" | "markdown" | "pdf";
 type ChatMode = "paper" | "ace";
@@ -44,13 +44,14 @@ export default function App() {
   const [newFolderName, setNewFolderName] = useState("");
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
-  const [leftWidth, setLeftWidth] = useState(300);
-  const [rightWidth, setRightWidth] = useState(340);
   const [paperLoading, setPaperLoading] = useState(false);
   const [dailyLoading, setDailyLoading] = useState(false);
   const [crawlLoading, setCrawlLoading] = useState(false);
   const [dailyGenerating, setDailyGenerating] = useState(false);
-  const [chatLoading, setChatLoading] = useState(false);
+  const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
+  const [toolCallsBySession, setToolCallsBySession] = useState<Record<string, ToolCallInfo[]>>({});
+  const [sessionLoading, setSessionLoading] = useState<Record<string, boolean>>({});
+  const streamingSessionsRef = useRef<Set<string>>(new Set());
   const [actionLoading, setActionLoading] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
@@ -62,13 +63,9 @@ export default function App() {
     const flags = [];
     if (leftCollapsed) flags.push("left-collapsed");
     if (rightCollapsed) flags.push("right-collapsed");
+    if (libraryMode === "daily") flags.push("daily-focus");
     return flags.join(" ");
-  }, [leftCollapsed, rightCollapsed]);
-
-  const shellStyle = {
-    "--left-width": `${leftWidth}px`,
-    "--right-width": `${rightWidth}px`
-  } as CSSProperties;
+  }, [leftCollapsed, rightCollapsed, libraryMode]);
 
   useEffect(() => {
     api.config().then((data) => {
@@ -108,7 +105,7 @@ export default function App() {
       const active = latest.items.filter((job) => job.status === "queued" || job.status === "running");
       const detailed = await Promise.all(active.map((job) => api.crawlJob(job.id).catch(() => job)));
       const detailedById = new Map(detailed.map((job) => [job.id, job]));
-      setCrawlJobs(latest.items.map((job) => detailedById.get(job.id) || job));
+      setCrawlJobs(latest.items.map((item) => detailedById.get(item.id) || item));
       if (!latest.items.some((job) => job.status === "queued" || job.status === "running")) {
         await loadPapers(category, query);
       }
@@ -203,7 +200,6 @@ export default function App() {
       const session = await api.createSession(mode, paper?.id, paper?.title || mode);
       setSessionId(session.id);
       setSessions([{ id: session.id, scope: mode, paperId: paper?.id, title: paper?.title || mode, updatedAt: new Date().toISOString() }, ...latest.items]);
-      setMessages([]);
     } catch (reason) {
       setError((reason as Error).message);
     }
@@ -211,8 +207,11 @@ export default function App() {
 
   async function selectSession(nextSessionId: string) {
     setSessionId(nextSessionId);
+    if (messagesBySession[nextSessionId]) {
+      return; // Already have cached messages
+    }
     const data = await api.listMessages(nextSessionId);
-    setMessages(data.items);
+    setMessagesBySession((prev) => ({ ...prev, [nextSessionId]: data.items }));
   }
 
   async function crawlLatest() {
@@ -294,24 +293,6 @@ export default function App() {
     document.addEventListener("selectionchange", handleSelectionChange);
     return () => document.removeEventListener("selectionchange", handleSelectionChange);
   }, []);
-
-  function startResize(side: "left" | "right") {
-    document.body.classList.add("is-resizing");
-    const handleMove = (event: PointerEvent) => {
-      if (side === "left") {
-        setLeftWidth(Math.min(460, Math.max(220, event.clientX - 14)));
-      } else {
-        setRightWidth(Math.min(520, Math.max(260, window.innerWidth - event.clientX - 14)));
-      }
-    };
-    const stop = () => {
-      document.body.classList.remove("is-resizing");
-      window.removeEventListener("pointermove", handleMove);
-      window.removeEventListener("pointerup", stop);
-    };
-    window.addEventListener("pointermove", handleMove);
-    window.addEventListener("pointerup", stop);
-  }
 
   async function analyzePaper() {
     if (!activePaper) return;
@@ -460,12 +441,20 @@ export default function App() {
     }
   }
 
-  async function sendMessage() {
+  function sendMessage() {
     if (!sessionId || !input.trim()) return;
+    const sid = sessionId;
     const content = input;
-    setChatLoading(true);
+    sendMessageInner(sid, content);
+  }
+
+  function sendMessageInner(sid: string, content: string) {
+    if (streamingSessionsRef.current.has(sid)) return; // Already streaming
+    streamingSessionsRef.current.add(sid);
+    setSessionLoading((prev) => ({ ...prev, [sid]: true }));
     setError("");
     setInput("");
+
     const userMessage: ChatMessage = {
       id: -Date.now(),
       role: "user",
@@ -479,34 +468,130 @@ export default function App() {
       content: "",
       createdAt: new Date().toISOString()
     };
-    setMessages((items) => [...items, userMessage, assistantMessage]);
-    try {
-      await api.streamMessage(sessionId, {
-        message: content,
-        paperId: activePaper?.id,
-        selection,
-        mode: chatMode
-      }, (chunk) => {
-        setMessages((items) => items.map((item) => item.id === assistantMessage.id ? { ...item, content: item.content + chunk } : item));
+    const pendingToolCalls: ToolCallInfo[] = [];
+
+    setMessagesBySession((prev) => ({
+      ...prev,
+      [sid]: [...(prev[sid] || []), userMessage, assistantMessage]
+    }));
+    setToolCallsBySession((prev) => ({ ...prev, [sid]: [] }));
+
+    // Run stream in background — don't await
+    api.streamMessage(
+      sid,
+      { message: content, paperId: activePaper?.id, selection, mode: chatMode },
+      (event: StreamEvent) => {
+        handleStreamEvent(sid, assistantMessage.id, pendingToolCalls, event);
+      }
+    )
+      .then(async () => {
+        await onStreamDone(sid);
+      })
+      .catch((reason: Error) => {
+        handleStreamError(sid, reason);
       });
-      const [messageData, sessionData] = await Promise.all([api.listMessages(sessionId), api.listSessions()]);
-      setMessages(messageData.items);
-      setSessions(sessionData.items);
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setChatLoading(false);
+  }
+
+  function handleStreamEvent(sid: string, assistantId: number, pendingToolCalls: ToolCallInfo[], event: StreamEvent) {
+    switch (event.type) {
+      case "text":
+        setMessagesBySession((prev) => {
+          const msgs = prev[sid] || [];
+          return {
+            ...prev,
+            [sid]: msgs.map((m) =>
+              m.id === assistantId ? { ...m, content: m.content + event.content } : m
+            )
+          };
+        });
+        break;
+      case "tool_start": {
+        const info: ToolCallInfo = {
+          toolCallId: event.toolCallId,
+          name: event.name,
+          arguments: event.arguments,
+          status: "running"
+        };
+        pendingToolCalls.push(info);
+        setToolCallsBySession((prev) => ({
+          ...prev,
+          [sid]: [...(prev[sid] || []), info]
+        }));
+        break;
+      }
+      case "tool_result": {
+        setToolCallsBySession((prev) => ({
+          ...prev,
+          [sid]: (prev[sid] || []).map((tc) =>
+            tc.toolCallId === event.toolCallId
+              ? { ...tc, status: "success", summary: event.summary }
+              : tc
+          )
+        }));
+        break;
+      }
+      case "approval": {
+        // Store approval info for the dialog
+        setToolCallsBySession((prev) => ({
+          ...prev,
+          [sid]: (prev[sid] || []).map((tc) =>
+            tc.toolCallId === event.toolCallId
+              ? { ...tc, status: "running", summary: `⚠️ 需要批准: ${event.command}` }
+              : tc
+          )
+        }));
+        break;
+      }
+      case "error":
+        setMessagesBySession((prev) => {
+          const msgs = prev[sid] || [];
+          return {
+            ...prev,
+            [sid]: msgs.map((m) =>
+              m.id === assistantId
+                ? { ...m, content: m.content + `\n\n[错误] ${event.message}` }
+                : m
+            )
+          };
+        });
+        break;
+      case "done":
+        break;
     }
   }
 
+  async function onStreamDone(sid: string) {
+    streamingSessionsRef.current.delete(sid);
+    setSessionLoading((prev) => ({ ...prev, [sid]: false }));
+    const [messageData, sessionData] = await Promise.all([
+      api.listMessages(sid),
+      api.listSessions()
+    ]);
+    setMessagesBySession((prev) => ({ ...prev, [sid]: messageData.items }));
+    setToolCallsBySession((prev) => ({ ...prev, [sid]: [] }));
+    setSessions(sessionData.items);
+  }
+
+  function handleStreamError(sid: string, reason: Error) {
+    streamingSessionsRef.current.delete(sid);
+    setSessionLoading((prev) => ({ ...prev, [sid]: false }));
+    setError(reason.message);
+  }
+
+  function handleApproveToolCall(toolCallId: string, approved: boolean) {
+    setToolCallsBySession((prev) => ({
+      ...prev,
+      [sessionId]: (prev[sessionId] || []).map((tc) =>
+        tc.toolCallId === toolCallId
+          ? { ...tc, status: approved ? "running" : "denied", summary: approved ? tc.summary : "❌ 已拒绝" }
+          : tc
+      )
+    }));
+    api.approveToolCall(sessionId, toolCallId, approved).catch(() => undefined);
+  }
+
   return (
-    <div className={`app-shell ${gridClass}`} style={shellStyle}>
-      <svg className="glass-defs" aria-hidden="true">
-        <filter id="liquid-distortion">
-          <feTurbulence type="fractalNoise" baseFrequency="0.018 0.045" numOctaves="2" seed="8" result="noise" />
-          <feDisplacementMap in="SourceGraphic" in2="noise" scale="10" xChannelSelector="R" yChannelSelector="G" />
-        </filter>
-      </svg>
+    <div className={`app-shell ${gridClass}`}>
       <Sidebar
         collapsed={leftCollapsed}
         categories={categories}
@@ -529,9 +614,7 @@ export default function App() {
         onCrawl={crawlLatest}
       />
 
-      <button className="resize-handle left" onPointerDown={() => startResize("left")} aria-label="调整左侧宽度" />
-
-      <section className={libraryMode === "settings" ? "center-stage settings-stage" : "center-stage"}>
+      <section className={libraryMode === "settings" ? "center-stage settings-stage" : libraryMode === "daily" ? "center-stage daily-stage" : "center-stage"}>
         {libraryMode === "settings" ? (
           <SettingsPanel
             activePaper={activePaper}
@@ -596,23 +679,23 @@ export default function App() {
         )}
       </section>
 
-      <button className="resize-handle right" onPointerDown={() => startResize("right")} aria-label="调整右侧宽度" />
-
       <ChatPanel
         collapsed={rightCollapsed}
         activePaper={activePaper}
         mode={chatMode}
-        messages={messages}
+        messages={messagesBySession[sessionId] || []}
+        toolCalls={toolCallsBySession[sessionId] || []}
         sessions={sessions}
         activeSessionId={sessionId}
         input={input}
         selection={selection}
-        loading={chatLoading}
+        loading={!!sessionLoading[sessionId]}
         onToggle={() => setRightCollapsed((value) => !value)}
         onMode={setChatMode}
         onSession={(id) => void selectSession(id)}
         onInput={setInput}
         onSend={sendMessage}
+        onApproveToolCall={(toolCallId, approved) => handleApproveToolCall(toolCallId, approved)}
       />
     </div>
   );

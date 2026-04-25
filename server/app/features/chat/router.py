@@ -66,4 +66,21 @@ async def stream_message(
         ):
             yield chunk
 
-    return StreamingResponse(event_stream(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson; charset=utf-8")
+
+
+class ApproveRequest(BaseModel):
+    approved: bool = True
+
+
+@router.post("/sessions/{session_id}/tools/{tool_call_id}/approve")
+def approve_tool_call(
+    session_id: str,
+    tool_call_id: str,
+    payload: ApproveRequest,
+    _: str = Depends(current_user_id),
+) -> dict:
+    ok = ChatService.approve_tool_call(tool_call_id, payload.approved)
+    if not ok:
+        return {"status": "not_found", "message": "No pending approval for this tool call"}
+    return {"status": "approved" if payload.approved else "denied"}
