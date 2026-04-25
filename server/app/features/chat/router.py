@@ -7,6 +7,7 @@ from app.shared.http import current_user_id
 
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+missions_router = APIRouter(prefix="/api/missions", tags=["missions"])
 
 
 class SessionRequest(BaseModel):
@@ -38,11 +39,31 @@ def list_messages(session_id: str, _: str = Depends(current_user_id)) -> dict:
     return {"items": ChatService().messages(session_id)}
 
 
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str, user_id: str = Depends(current_user_id)) -> dict:
+    return ChatService().delete_session(user_id, session_id)
+
+
 @router.post("/sessions/{session_id}/messages")
 async def send_message(
     session_id: str, payload: MessageRequest, user_id: str = Depends(current_user_id)
 ) -> dict:
     return await ChatService().reply(
+        user_id=user_id,
+        session_id=session_id,
+        message=payload.message,
+        paper_id=payload.paperId,
+        selection=payload.selection,
+        attachment_paper_ids=payload.attachmentPaperIds,
+        mode=payload.mode,
+    )
+
+
+@router.post("/sessions/{session_id}/submit")
+def submit_message(
+    session_id: str, payload: MessageRequest, user_id: str = Depends(current_user_id)
+) -> dict:
+    return ChatService().submit_mission(
         user_id=user_id,
         session_id=session_id,
         message=payload.message,
@@ -87,3 +108,8 @@ def approve_tool_call(
     if not ok:
         return {"status": "not_found", "message": "No pending approval for this tool call"}
     return {"status": "approved" if payload.approved else "denied"}
+
+
+@missions_router.get("/{mission_id}")
+def get_mission(mission_id: int, user_id: str = Depends(current_user_id)) -> dict:
+    return ChatService().get_mission(mission_id, user_id)

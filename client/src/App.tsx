@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatPanel } from "./components/ChatPanel";
 import { DailyPaperPanel } from "./components/DailyPaperPanel";
+import { HistoryPanel } from "./components/HistoryPanel";
 import { PaperList } from "./components/PaperList";
 import { PaperViewer } from "./components/PaperViewer";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar, type LibraryMode } from "./components/Sidebar";
-import { api, type ChatMessage, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper, type StreamEvent, type ToolCallInfo } from "./lib/api";
+import { api, type ChatMessage, type ChatMission, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper, type StreamEvent, type ToolCallInfo } from "./lib/api";
 
 type ViewMode = "summary" | "markdown" | "pdf";
 type ChatMode = "paper" | "ace";
@@ -44,6 +45,7 @@ export default function App() {
   const [newFolderName, setNewFolderName] = useState("");
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [paperLoading, setPaperLoading] = useState(false);
   const [dailyLoading, setDailyLoading] = useState(false);
   const [crawlLoading, setCrawlLoading] = useState(false);
@@ -160,6 +162,24 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [dailyRuns, libraryMode, dailyTargetDate, dailyCategories]);
 
+  useEffect(() => {
+    const activeMissions = sessions
+      .map((session) => session.latestMission)
+      .filter((mission): mission is ChatMission => !!mission && (mission.status === "queued" || mission.status === "running"));
+    if (!activeMissions.length) return;
+    const timer = window.setInterval(async () => {
+      const missionStatuses = await Promise.all(activeMissions.map((mission) => api.getMission(mission.id).catch(() => mission)));
+      const completed = missionStatuses.filter((mission) => mission.status === "done" || mission.status === "failed");
+      const latest = await api.listSessions();
+      setSessions(latest.items);
+      for (const mission of completed) {
+        const data = await api.listMessages(mission.sessionId);
+        setMessagesBySession((prev) => ({ ...prev, [mission.sessionId]: data.items }));
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [sessions]);
+
   async function loadPapers(nextCategory = category, nextQuery = query) {
     if (libraryMode === "settings" || libraryMode === "daily") return;
     setPaperLoading(true);
@@ -250,6 +270,84 @@ export default function App() {
     }
     const data = await api.listMessages(nextSessionId);
     setMessagesBySession((prev) => ({ ...prev, [nextSessionId]: data.items }));
+  }
+
+  async function openHistorySession(session: ChatSession) {
+    setError("");
+    try {
+      setChatMode(session.scope);
+      if (session.scope === "paper" && session.paperId && activePaper?.id !== session.paperId) {
+        const paper = await api.getPaper(session.paperId);
+        setActivePaper(paper);
+        setViewMode("summary");
+      }
+      await selectSession(session.id);
+      setHistoryOpen(false);
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
+  }
+
+  async function createNewChatSession() {
+    if (chatMode === "paper" && !activePaper) {
+      setError("请先选择一篇论文再新建 Paper Chat。");
+      return;
+    }
+    setError("");
+    try {
+      const title = chatMode === "paper" ? activePaper?.title || "Paper Chat" : "Ace Chat";
+      const session = await api.createSession(chatMode, activePaper?.id, title);
+      const next: ChatSession = {
+        id: session.id,
+        scope: chatMode,
+        paperId: activePaper?.id,
+        title,
+        preview: "",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      setSessionId(session.id);
+      setMessagesBySession((prev) => ({ ...prev, [session.id]: [] }));
+      setToolCallsBySession((prev) => ({ ...prev, [session.id]: [] }));
+      setSessions((items) => [next, ...items]);
+      setHistoryOpen(false);
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
+  }
+
+  async function deleteHistorySession(session: ChatSession) {
+    const label = session.title || (session.scope === "paper" ? "Paper Chat" : "Ace Chat");
+    const confirmed = window.confirm(`删除「${label}」这条会话历史？此操作不能撤销。`);
+    if (!confirmed) return;
+    setError("");
+    try {
+      await api.deleteSession(session.id);
+      const remaining = sessions.filter((item) => item.id !== session.id);
+      setSessions(remaining);
+      setMessagesBySession((prev) => {
+        const next = { ...prev };
+        delete next[session.id];
+        return next;
+      });
+      setToolCallsBySession((prev) => {
+        const next = { ...prev };
+        delete next[session.id];
+        return next;
+      });
+      if (session.id === sessionId) {
+        const nextSession = remaining[0];
+        if (nextSession) {
+          await openHistorySession(nextSession);
+        } else {
+          setSessionId("");
+          setMessagesBySession({});
+          setToolCallsBySession({});
+        }
+      }
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
   }
 
   async function crawlLatest() {
@@ -485,6 +583,32 @@ export default function App() {
     const content = input;
     const attachmentPaperIds = chatAttachments.map((paper) => paper.id);
     sendMessageInner(sid, content, attachmentPaperIds);
+  }
+
+  async function submitBackgroundMission() {
+    if (!sessionId || !input.trim()) return;
+    const sid = sessionId;
+    const content = input;
+    const attachmentPaperIds = chatAttachments.map((paper) => paper.id);
+    setError("");
+    setInput("");
+    setMentionResults([]);
+    setMentionOpen(false);
+    setChatAttachments([]);
+    try {
+      const mission = await api.submitMission(sid, {
+        message: content,
+        paperId: activePaper?.id,
+        selection,
+        attachmentPaperIds,
+        mode: chatMode
+      });
+      const latest = await api.listSessions();
+      setSessions(latest.items.map((item) => item.id === sid ? { ...item, latestMission: mission } : item));
+      setHistoryOpen(true);
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
   }
 
   function sendMessageInner(sid: string, content: string, attachmentPaperIds: number[]) {
@@ -758,12 +882,23 @@ export default function App() {
         mentionResults={mentionResults}
         mentionOpen={mentionOpen}
         onToggle={() => setRightCollapsed((value) => !value)}
+        onHistory={() => setHistoryOpen(true)}
         onMode={setChatMode}
         onInput={setInput}
         onSend={sendMessage}
+        onSubmitMission={submitBackgroundMission}
         onApproveToolCall={(toolCallId, approved) => handleApproveToolCall(toolCallId, approved)}
         onAttachPaper={attachPaperFromMention}
         onRemoveAttachment={removeChatAttachment}
+      />
+      <HistoryPanel
+        open={historyOpen}
+        sessions={sessions}
+        activeSessionId={sessionId}
+        onClose={() => setHistoryOpen(false)}
+        onSelect={openHistorySession}
+        onNewSession={createNewChatSession}
+        onDeleteSession={deleteHistorySession}
       />
     </div>
   );

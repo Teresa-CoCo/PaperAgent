@@ -1,9 +1,11 @@
 import json
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import date
 
 from app.db.connection import transaction
+from app.core.errors import AppError
 from app.features.papers.arxiv_tool import ArxivTool
 from app.features.papers.service import PaperService
 from app.features.tools.brave_search import BraveSearchTool
@@ -21,6 +23,7 @@ from app.features.tools.registry import (
 from app.features.users.service import UserPreferenceService, ensure_user
 
 MAX_TOOL_TURNS = 6
+_mission_queue_lock = asyncio.Lock()
 
 
 class ChatService:
@@ -61,16 +64,48 @@ class ChatService:
         ensure_user(user_id)
         with transaction() as connection:
             rows = connection.execute(
-                "SELECT * FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC",
+                """
+                SELECT
+                  s.*,
+                  (
+                    SELECT content
+                    FROM chat_messages
+                    WHERE session_id = s.id
+                    ORDER BY id DESC
+                    LIMIT 1
+                  ) AS preview
+                FROM chat_sessions s
+                WHERE s.user_id = ?
+                ORDER BY s.updated_at DESC
+                """,
                 (user_id,),
             ).fetchall()
+            mission_rows = connection.execute(
+                """
+                SELECT *
+                FROM chat_missions
+                WHERE user_id = ?
+                  AND id IN (
+                    SELECT MAX(id)
+                    FROM chat_missions
+                    WHERE user_id = ?
+                    GROUP BY session_id
+                  )
+                ORDER BY created_at DESC, id DESC
+                """,
+                (user_id, user_id),
+            ).fetchall()
+        missions_by_session = {row["session_id"]: self._mission_to_api(row) for row in mission_rows}
         return [
             {
                 "id": row["id"],
                 "scope": row["scope"],
                 "paperId": row["paper_id"],
                 "title": row["title"],
+                "preview": row["preview"] or "",
+                "createdAt": row["created_at"],
                 "updatedAt": row["updated_at"],
+                "latestMission": missions_by_session.get(row["id"]),
             }
             for row in rows
         ]
@@ -91,6 +126,18 @@ class ChatService:
             }
             for row in rows
         ]
+
+    def delete_session(self, user_id: str, session_id: str) -> dict:
+        ensure_user(user_id)
+        with transaction() as connection:
+            row = connection.execute(
+                "SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?",
+                (session_id, user_id),
+            ).fetchone()
+            if not row:
+                raise AppError("Chat session not found", 404, "chat_session_not_found")
+            connection.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+        return {"deletedSessionId": session_id}
 
     # ------------------------------------------------------------------
     # Non-streaming reply (legacy)
@@ -143,6 +190,140 @@ class ChatService:
                 (session_id,),
             )
         return {"answer": answer, "messages": self.messages(session_id)}
+
+    # ------------------------------------------------------------------
+    # Background missions
+    # ------------------------------------------------------------------
+
+    def submit_mission(
+        self,
+        user_id: str,
+        session_id: str,
+        message: str,
+        paper_id: int | None = None,
+        selection: str | None = None,
+        attachment_paper_ids: list[int] | None = None,
+        mode: str = "paper",
+    ) -> dict:
+        ensure_user(user_id)
+        attachment_paper_ids = attachment_paper_ids or []
+        with transaction() as connection:
+            session = connection.execute(
+                "SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?",
+                (session_id, user_id),
+            ).fetchone()
+            if not session:
+                raise AppError("Chat session not found", 404, "chat_session_not_found")
+            cursor = connection.execute(
+                """
+                INSERT INTO chat_missions(
+                  session_id, user_id, status, mode, message, paper_id, selection, attachment_paper_ids
+                )
+                VALUES(?, ?, 'queued', ?, ?, ?, ?, ?)
+                """,
+                (session_id, user_id, mode, message, paper_id, selection, json.dumps(attachment_paper_ids)),
+            )
+            mission_id = int(cursor.lastrowid)
+        return self.get_mission(mission_id, user_id)
+
+    def get_mission(self, mission_id: int, user_id: str | None = None) -> dict:
+        params: list[object] = [mission_id]
+        sql = "SELECT * FROM chat_missions WHERE id = ?"
+        if user_id:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        with transaction() as connection:
+            row = connection.execute(sql, params).fetchone()
+        if not row:
+            raise AppError("Mission not found", 404, "mission_not_found")
+        return self._mission_to_api(row)
+
+    async def run_mission_queue(self) -> None:
+        async with _mission_queue_lock:
+            self._recover_interrupted_missions()
+            while True:
+                mission = self._next_mission()
+                if not mission:
+                    await asyncio.sleep(1.0)
+                    continue
+                await self._run_mission(int(mission["id"]))
+
+    def _recover_interrupted_missions(self) -> None:
+        with transaction() as connection:
+            connection.execute(
+                """
+                UPDATE chat_missions
+                SET status = 'queued',
+                    error_message = COALESCE(error_message, 'Recovered after server restart'),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'running'
+                """
+            )
+
+    def _next_mission(self) -> dict | None:
+        with transaction() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM chat_missions
+                WHERE status = 'queued'
+                ORDER BY created_at ASC, id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+
+    async def _run_mission(self, mission_id: int) -> None:
+        with transaction() as connection:
+            updated = connection.execute(
+                """
+                UPDATE chat_missions
+                SET status = 'running',
+                    started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP,
+                    error_message = NULL
+                WHERE id = ? AND status = 'queued'
+                """,
+                (mission_id,),
+            ).rowcount
+            row = connection.execute("SELECT * FROM chat_missions WHERE id = ?", (mission_id,)).fetchone()
+        if not updated or not row:
+            return
+
+        try:
+            attachment_paper_ids = json.loads(row["attachment_paper_ids"] or "[]")
+            await self.reply(
+                user_id=row["user_id"],
+                session_id=row["session_id"],
+                message=row["message"],
+                paper_id=row["paper_id"],
+                selection=row["selection"],
+                attachment_paper_ids=attachment_paper_ids,
+                mode=row["mode"],
+            )
+            with transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE chat_missions
+                    SET status = 'done',
+                        updated_at = CURRENT_TIMESTAMP,
+                        finished_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (mission_id,),
+                )
+        except Exception as exc:
+            with transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE chat_missions
+                    SET status = 'failed',
+                        error_message = ?,
+                        updated_at = CURRENT_TIMESTAMP,
+                        finished_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (self._user_facing_error(exc), mission_id),
+                )
 
     # ------------------------------------------------------------------
     # Streaming reply (main entrypoint)
@@ -648,6 +829,21 @@ class ChatService:
             f"{active_paper_block}"
             f"{attachment_block}"
         )[:12000]
+
+    def _mission_to_api(self, row: dict) -> dict:
+        return {
+            "id": row["id"],
+            "sessionId": row["session_id"],
+            "status": row["status"],
+            "mode": row["mode"],
+            "message": row["message"],
+            "paperId": row["paper_id"],
+            "errorMessage": row["error_message"],
+            "createdAt": row["created_at"],
+            "startedAt": row["started_at"],
+            "updatedAt": row["updated_at"],
+            "finishedAt": row["finished_at"],
+        }
 
     def _message_for_storage(self, message: str, attachment_paper_ids: list[int] | None = None) -> str:
         attachment_block = self._format_attachment_block(attachment_paper_ids)

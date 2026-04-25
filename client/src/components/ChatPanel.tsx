@@ -16,9 +16,11 @@ type Props = {
   mentionResults: Paper[];
   mentionOpen: boolean;
   onToggle: () => void;
+  onHistory: () => void;
   onMode: (mode: "paper" | "ace") => void;
   onInput: (value: string) => void;
   onSend: () => void;
+  onSubmitMission: () => void;
   onApproveToolCall: (toolCallId: string, approved: boolean) => void;
   onAttachPaper: (paper: Paper) => void;
   onRemoveAttachment: (paperId: number) => void;
@@ -102,9 +104,11 @@ export function ChatPanel({
   mentionResults,
   mentionOpen,
   onToggle,
+  onHistory,
   onMode,
   onInput,
   onSend,
+  onSubmitMission,
   onApproveToolCall,
   onAttachPaper,
   onRemoveAttachment
@@ -146,13 +150,18 @@ export function ChatPanel({
               <p className="eyebrow">Chat</p>
               <h2>{mode === "paper" ? "Paper Chat" : "Ace Chat"}</h2>
             </div>
-            <div className="mode-tabs compact">
-              <button className={mode === "paper" ? "active" : ""} onClick={() => onMode("paper")}>
-                Paper
+            <div className="chat-head-actions">
+              <button type="button" className="history-open-button" onClick={onHistory}>
+                历史
               </button>
-              <button className={mode === "ace" ? "active" : ""} onClick={() => onMode("ace")}>
-                Ace
-              </button>
+              <div className="mode-tabs compact">
+                <button className={mode === "paper" ? "active" : ""} onClick={() => onMode("paper")}>
+                  Paper
+                </button>
+                <button className={mode === "ace" ? "active" : ""} onClick={() => onMode("ace")}>
+                  Ace
+                </button>
+              </div>
             </div>
           </div>
 
@@ -227,9 +236,19 @@ export function ChatPanel({
                 ))}
               </div>
             )}
-            <button onClick={onSend} disabled={loading || !input.trim() || (mode === "paper" && !activePaper)}>
-              发送
-            </button>
+            <div className="composer-actions">
+              <button
+                type="button"
+                className="secondary-send-button"
+                onClick={onSubmitMission}
+                disabled={loading || !input.trim() || (mode === "paper" && !activePaper)}
+              >
+                后台
+              </button>
+              <button onClick={onSend} disabled={loading || !input.trim() || (mode === "paper" && !activePaper)}>
+                发送
+              </button>
+            </div>
           </div>
         </div>
       )}

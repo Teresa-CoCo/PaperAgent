@@ -10,7 +10,8 @@ from app.core.config import get_settings
 from app.core.errors import AppError, app_error_handler, unhandled_error_handler
 from app.core.logging import request_context_middleware, security_headers_middleware
 from app.db.connection import init_db
-from app.features.chat.router import router as chat_router
+from app.features.chat.router import missions_router, router as chat_router
+from app.features.chat.service import ChatService
 from app.features.daily_papers.router import router as daily_papers_router
 from app.features.papers.router import router as papers_router
 from app.features.users.router import router as users_router
@@ -26,6 +27,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     scheduler.start()
     asyncio.create_task(PaperService().run_crawl_queue())
     asyncio.create_task(DailyPaperService().run_queue())
+    asyncio.create_task(ChatService().run_mission_queue())
     try:
         yield
     finally:
@@ -49,6 +51,7 @@ def create_app() -> FastAPI:
     app.include_router(papers_router)
     app.include_router(daily_papers_router)
     app.include_router(chat_router)
+    app.include_router(missions_router)
     app.include_router(users_router)
     app.mount("/storage", StaticFiles(directory=settings.storage_root), name="storage")
     return app

@@ -62,6 +62,23 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS chat_missions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'queued',
+  mode TEXT NOT NULL DEFAULT 'paper',
+  message TEXT NOT NULL,
+  paper_id INTEGER REFERENCES papers(id) ON DELETE SET NULL,
+  selection TEXT,
+  attachment_paper_ids TEXT NOT NULL DEFAULT '[]',
+  error_message TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS ocr_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   paper_id INTEGER REFERENCES papers(id) ON DELETE SET NULL,

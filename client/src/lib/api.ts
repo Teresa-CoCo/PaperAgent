@@ -53,12 +53,29 @@ export type ChatMessage = {
   createdAt: string;
 };
 
+export type ChatMission = {
+  id: number;
+  sessionId: string;
+  status: "queued" | "running" | "done" | "failed";
+  mode: "paper" | "ace";
+  message: string;
+  paperId?: number;
+  errorMessage?: string;
+  createdAt: string;
+  startedAt?: string;
+  updatedAt: string;
+  finishedAt?: string;
+};
+
 export type ChatSession = {
   id: string;
   scope: "paper" | "ace";
   paperId?: number;
   title: string;
+  preview?: string;
+  createdAt?: string;
   updatedAt: string;
+  latestMission?: ChatMission;
 };
 
 export type UserSettings = {
@@ -258,7 +275,20 @@ export const api = {
       body: JSON.stringify({ scope, paperId, title })
     }),
   listSessions: () => request<{ items: ChatSession[] }>("/api/chat/sessions"),
+  deleteSession: (sessionId: string) =>
+    request<{ deletedSessionId: string }>(`/api/chat/sessions/${sessionId}`, {
+      method: "DELETE"
+    }),
   listMessages: (sessionId: string) => request<{ items: ChatMessage[] }>(`/api/chat/sessions/${sessionId}/messages`),
+  submitMission: (
+    sessionId: string,
+    payload: { message: string; paperId?: number; selection?: string; attachmentPaperIds?: number[]; mode: "paper" | "ace" }
+  ) =>
+    request<ChatMission>(`/api/chat/sessions/${sessionId}/submit`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  getMission: (id: number) => request<ChatMission>(`/api/missions/${id}`),
   streamMessage: async (
     sessionId: string,
     payload: { message: string; paperId?: number; selection?: string; attachmentPaperIds?: number[]; mode: "paper" | "ace" },

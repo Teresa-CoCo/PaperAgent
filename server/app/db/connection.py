@@ -38,6 +38,7 @@ def init_db() -> None:
         connection.executescript(schema_path.read_text(encoding="utf-8"))
         ensure_column(connection, "crawl_job_steps", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "crawl_job_steps", "next_run_at", "TEXT")
+        ensure_column(connection, "chat_missions", "updated_at", "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP")
 
 
 def ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
