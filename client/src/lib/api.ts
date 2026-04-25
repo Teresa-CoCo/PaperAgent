@@ -261,7 +261,7 @@ export const api = {
   listMessages: (sessionId: string) => request<{ items: ChatMessage[] }>(`/api/chat/sessions/${sessionId}/messages`),
   streamMessage: async (
     sessionId: string,
-    payload: { message: string; paperId?: number; selection?: string; mode: "paper" | "ace" },
+    payload: { message: string; paperId?: number; selection?: string; attachmentPaperIds?: number[]; mode: "paper" | "ace" },
     onEvent: (event: StreamEvent) => void
   ) => {
     const response = await fetch(`${API_BASE_URL}/api/chat/sessions/${sessionId}/stream`, {

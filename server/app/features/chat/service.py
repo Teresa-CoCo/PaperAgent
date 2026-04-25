@@ -1,6 +1,7 @@
 import json
 import uuid
 from collections.abc import AsyncIterator
+from datetime import date
 
 from app.db.connection import transaction
 from app.features.papers.arxiv_tool import ArxivTool
@@ -102,20 +103,35 @@ class ChatService:
         message: str,
         paper_id: int | None = None,
         selection: str | None = None,
+        attachment_paper_ids: list[int] | None = None,
         mode: str = "paper",
     ) -> dict:
         ensure_user(user_id)
         self.preferences.update_from_text(user_id, message)
+        stored_message = self._message_for_storage(message, attachment_paper_ids)
         with transaction() as connection:
             connection.execute(
                 "INSERT INTO chat_messages(session_id, role, content, selection) VALUES(?, 'user', ?, ?)",
-                (session_id, message, selection),
+                (session_id, stored_message, selection),
             )
+        session_history = self._recent_session_messages(session_id)
 
         if mode == "ace":
-            answer = await self._ace_reply(user_id, message)
+            answer = await self._ace_reply(
+                user_id,
+                message,
+                session_history=session_history,
+                active_paper_id=paper_id,
+                attachment_paper_ids=attachment_paper_ids,
+            )
         else:
-            answer = await self._paper_reply(message, paper_id, selection)
+            answer = await self._paper_reply(
+                message,
+                paper_id,
+                selection,
+                session_history=session_history,
+                attachment_paper_ids=attachment_paper_ids,
+            )
 
         with transaction() as connection:
             connection.execute(
@@ -139,25 +155,40 @@ class ChatService:
         message: str,
         paper_id: int | None = None,
         selection: str | None = None,
+        attachment_paper_ids: list[int] | None = None,
         mode: str = "paper",
     ) -> AsyncIterator[str]:
         ensure_user(user_id)
         self.preferences.update_from_text(user_id, message)
+        stored_message = self._message_for_storage(message, attachment_paper_ids)
         with transaction() as connection:
             connection.execute(
                 "INSERT INTO chat_messages(session_id, role, content, selection) VALUES(?, 'user', ?, ?)",
-                (session_id, message, selection),
+                (session_id, stored_message, selection),
             )
+        session_history = self._recent_session_messages(session_id)
 
         text_chunks: list[str] = []
         try:
             if mode == "ace":
-                async for event in self._stream_ace_ndjson(user_id, message):
+                async for event in self._stream_ace_ndjson(
+                    user_id,
+                    message,
+                    session_history=session_history,
+                    active_paper_id=paper_id,
+                    attachment_paper_ids=attachment_paper_ids,
+                ):
                     text_chunks = self._accumulate_text(event, text_chunks)
                     yield event + "\n"
             else:
                 fallback_answer = self._local_answer(user_id, message) if mode == "ace" else ""
-                async for event in self._stream_paper_ndjson(message, paper_id, selection):
+                async for event in self._stream_paper_ndjson(
+                    message,
+                    paper_id,
+                    selection,
+                    session_history=session_history,
+                    attachment_paper_ids=attachment_paper_ids,
+                ):
                     text_chunks = self._accumulate_text(event, text_chunks)
                     yield event + "\n"
         except Exception as exc:
@@ -197,52 +228,57 @@ class ChatService:
         message: str,
         paper_id: int | None,
         selection: str | None,
+        session_history: list[dict],
+        attachment_paper_ids: list[int] | None = None,
     ) -> AsyncIterator[str]:
         """Paper mode — wraps LLM stream in NDJSON text events."""
         context_chunks = self.papers.retrieve_context(paper_id, message if message.strip() else selection or "")
-        selection_block = f"\nSelected markdown:\n{selection[:3000]}" if selection else ""
-        prompt = (
-            f"Question: {message}\n"
-            f"{selection_block}\n"
-            "Retrieved context:\n"
-            + "\n---\n".join(context_chunks)
-        )
-        messages = [
-            ChatMessage("system", "Answer in Chinese. Cite uncertainty. Use only supplied paper context when possible."),
-            ChatMessage("user", prompt[:14000]),
-        ]
+        prompt = self._paper_user_prompt(message, paper_id, selection, context_chunks, attachment_paper_ids)
+        messages = self._paper_conversation_messages(session_history, prompt)
         async for chunk in self.llm.stream(messages):
             yield json.dumps({"type": "text", "content": chunk}, ensure_ascii=False)
         yield json.dumps({"type": "done"})
 
-    async def _paper_reply(self, message: str, paper_id: int | None, selection: str | None) -> str:
+    async def _paper_reply(
+        self,
+        message: str,
+        paper_id: int | None,
+        selection: str | None,
+        session_history: list[dict],
+        attachment_paper_ids: list[int] | None = None,
+    ) -> str:
         context_chunks = self.papers.retrieve_context(paper_id, message if message.strip() else selection or "")
-        selection_block = f"\nSelected markdown:\n{selection[:3000]}" if selection else ""
-        prompt = (
-            f"Question: {message}\n"
-            f"{selection_block}\n"
-            "Retrieved context:\n"
-            + "\n---\n".join(context_chunks)
-        )
-        return await self.llm.complete(
+        prompt = self._paper_user_prompt(message, paper_id, selection, context_chunks, attachment_paper_ids)
+        response = await self.llm.complete(
             "paper-chat",
-            [
-                ChatMessage("system", "Answer in Chinese. Cite uncertainty. Use only supplied paper context when possible."),
-                ChatMessage("user", prompt[:14000]),
-            ],
+            self._paper_conversation_messages(session_history, prompt),
             use_cache=False,
         )
+        return response.content
 
     # ------------------------------------------------------------------
     # Ace mode — tool-calling agent
     # ------------------------------------------------------------------
 
-    async def _stream_ace_ndjson(self, user_id: str, message: str) -> AsyncIterator[str]:
+    async def _stream_ace_ndjson(
+        self,
+        user_id: str,
+        message: str,
+        session_history: list[dict],
+        active_paper_id: int | None = None,
+        attachment_paper_ids: list[int] | None = None,
+    ) -> AsyncIterator[str]:
         """Ace mode tool-calling loop with NDJSON streaming events.
 
         Yields JSON lines: tool_start, approval, tool_result, text, done.
         """
-        messages = self._ace_initial_messages(user_id, message)
+        messages = self._ace_initial_messages(
+            user_id,
+            message,
+            session_history=session_history,
+            active_paper_id=active_paper_id,
+            attachment_paper_ids=attachment_paper_ids,
+        )
         tools = tool_definitions()
         ctx = self._tool_ctx(user_id)
 
@@ -345,9 +381,22 @@ class ChatService:
             yield json.dumps({"type": "text", "content": chunk}, ensure_ascii=False)
         yield json.dumps({"type": "done"})
 
-    async def _ace_reply(self, user_id: str, message: str) -> str:
+    async def _ace_reply(
+        self,
+        user_id: str,
+        message: str,
+        session_history: list[dict],
+        active_paper_id: int | None = None,
+        attachment_paper_ids: list[int] | None = None,
+    ) -> str:
         """Non-streaming Ace mode with tool calling."""
-        messages = self._ace_initial_messages(user_id, message)
+        messages = self._ace_initial_messages(
+            user_id,
+            message,
+            session_history=session_history,
+            active_paper_id=active_paper_id,
+            attachment_paper_ids=attachment_paper_ids,
+        )
         tools = tool_definitions()
         ctx = self._tool_ctx(user_id)
 
@@ -378,14 +427,23 @@ class ChatService:
                 ))
         return "工具调用次数已达上限，基于已有信息回答。"
 
-    def _ace_initial_messages(self, user_id: str, message: str) -> list[ChatMessage]:
+    def _ace_initial_messages(
+        self,
+        user_id: str,
+        message: str,
+        session_history: list[dict],
+        active_paper_id: int | None = None,
+        attachment_paper_ids: list[int] | None = None,
+    ) -> list[ChatMessage]:
         """Build initial messages for Ace mode with tool-calling system prompt."""
-        return [
+        today = date.today().isoformat()
+        messages = [
             ChatMessage(
                 "system",
                 (
-                    "你是一个研究助手 Ace Chat，拥有以下工具的完全使用权。当用户的问题需要查询信息或执行操作时，"
-                    "你可以自主决定调用哪些工具、按什么顺序调用，并使用工具返回的结果来回答用户。\n\n"
+                    f"你是研究工作台里的 Ace Chat。今天的日期是 {today}。\n"
+                    "你拥有以下工具的完全使用权。当用户的问题需要查询信息、检索论文、联网查询或执行操作时，"
+                    "你要主动决定是否调用工具，并基于工具结果回答。\n\n"
                     "可用工具：\n"
                     "1. search_database — 在本地 SQLite 论文库中按关键词搜索论文\n"
                     "2. search_rag_database — 深入某篇论文的解析内容进行问答\n"
@@ -395,15 +453,21 @@ class ChatService:
                     "6. list_favorite_folders — 列出所有收藏文件夹\n"
                     "7. shell_execute — 执行安全的 shell 命令（危险命令需用户批准）\n\n"
                     "工作原则：\n"
-                    "- 可以同时调用多个工具以加速（如同时搜索数据库和 arXiv）\n"
-                    "- 多步任务可以连续调用不同工具（如先搜索→再收藏）\n"
-                    "- 用中文回答，给出引用来源（论文的 arxivId 或网页 URL）\n"
-                    "- 如果工具返回空结果，如实告知用户\n"
-                    "- 不要编造工具没返回的信息"
+                    "- 会话是连续的。优先继承当前会话里已经确认的偏好、约束和上下文，不要把每轮都当成全新问题。\n"
+                    "- 当用户提到“今天、当前、实时、最新、recent、latest”时，保留这些时间约束，必要时用确切日期补全为 "
+                    f"{today}，不要擅自改成别的年份或日期。\n"
+                    "- 做网页搜索时优先使用直接、贴近用户原话的查询词，不要为了“优化”而篡改核心条件。\n"
+                    "- 如果当前界面有用户选中的论文或显式附加的论文，把它们当作高优先级上下文。\n"
+                    "- 可以同时调用多个工具以加速，多步任务也可以连续调用不同工具。\n"
+                    "- 用中文回答，结论后面附来源（论文 arxivId / 标题，或网页 URL）。\n"
+                    "- 如果工具返回空结果、配置缺失或时间信息不确定，要明确说出来。\n"
+                    "- 不要编造工具没返回的信息。"
                 ),
             ),
-            ChatMessage("user", message),
         ]
+        messages.extend(self._history_to_chat_messages(session_history[:-1]))
+        messages.append(ChatMessage("user", self._ace_user_prompt(message, active_paper_id, attachment_paper_ids)))
+        return messages
 
     # ------------------------------------------------------------------
     # Fallbacks
@@ -477,3 +541,116 @@ class ChatService:
             "tags": paper.get("tags", []),
             "summary": (paper.get("aiSummary") or paper.get("abstract") or "")[:900],
         }
+
+    def _recent_session_messages(self, session_id: str, limit: int = 16) -> list[dict]:
+        with transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM (
+                  SELECT * FROM chat_messages
+                  WHERE session_id = ?
+                  ORDER BY id DESC
+                  LIMIT ?
+                ) recent
+                ORDER BY id ASC
+                """,
+                (session_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _history_to_chat_messages(self, rows: list[dict]) -> list[ChatMessage]:
+        messages: list[ChatMessage] = []
+        for row in rows:
+            role = row.get("role")
+            content = (row.get("content") or "").strip()
+            if role not in {"user", "assistant"} or not content:
+                continue
+            messages.append(ChatMessage(role=role, content=content[:6000]))
+        return messages
+
+    def _attachment_papers(self, paper_ids: list[int] | None, exclude_paper_id: int | None = None) -> list[dict]:
+        if not paper_ids:
+            return []
+        filtered = [paper_id for paper_id in paper_ids if paper_id != exclude_paper_id]
+        return self.papers.get_papers_by_ids(filtered[:6])
+
+    def _format_attachment_block(self, paper_ids: list[int] | None, exclude_paper_id: int | None = None) -> str:
+        papers = self._attachment_papers(paper_ids, exclude_paper_id=exclude_paper_id)
+        if not papers:
+            return ""
+        lines = ["用户附加了这些论文，请优先将它们作为额外上下文："]
+        for index, paper in enumerate(papers, start=1):
+            authors = ", ".join((paper.get("authors") or [])[:4])
+            summary = (paper.get("aiSummary") or paper.get("abstract") or "").replace("\n", " ").strip()
+            lines.append(
+                f"{index}. [{paper['id']}] {paper['title']} (arXiv: {paper.get('arxivId', '')})"
+                + (f" | Authors: {authors}" if authors else "")
+                + (f"\n   摘要: {summary[:400]}" if summary else "")
+            )
+        return "\n".join(lines)
+
+    def _paper_user_prompt(
+        self,
+        message: str,
+        paper_id: int | None,
+        selection: str | None,
+        context_chunks: list[str],
+        attachment_paper_ids: list[int] | None = None,
+    ) -> str:
+        selection_block = f"\n用户当前选中的原文片段：\n{selection[:3000]}" if selection else ""
+        attachment_block = self._format_attachment_block(attachment_paper_ids, exclude_paper_id=paper_id)
+        retrieval_block = "\n---\n".join(context_chunks) if context_chunks else "无额外检索片段。"
+        return (
+            f"今天日期：{date.today().isoformat()}\n"
+            f"当前论文 ID：{paper_id or '未知'}\n"
+            f"用户问题：{message}\n"
+            f"{selection_block}\n"
+            f"{attachment_block}\n"
+            "当前论文检索上下文：\n"
+            f"{retrieval_block}"
+        )[:14000]
+
+    def _paper_conversation_messages(self, session_history: list[dict], current_prompt: str) -> list[ChatMessage]:
+        messages = [
+            ChatMessage(
+                "system",
+                (
+                    f"你是 Paper Chat。今天的日期是 {date.today().isoformat()}。\n"
+                    "你要延续当前会话，不要忽略同一会话里前面的问答。"
+                    "优先基于当前论文的检索片段回答；如果用户附加了其他论文，把它们视为次级参考。"
+                    "用中文回答；不确定时明确说明；引用时优先写 arXiv 编号或论文标题。"
+                ),
+            )
+        ]
+        messages.extend(self._history_to_chat_messages(session_history[:-1]))
+        messages.append(ChatMessage("user", current_prompt))
+        return messages
+
+    def _ace_user_prompt(
+        self,
+        message: str,
+        active_paper_id: int | None = None,
+        attachment_paper_ids: list[int] | None = None,
+    ) -> str:
+        active_paper_block = ""
+        if active_paper_id:
+            try:
+                active_paper = self.papers.get_papers_by_ids([active_paper_id])[0]
+                active_paper_block = (
+                    "当前界面焦点论文：\n"
+                    f"- [{active_paper['id']}] {active_paper['title']} (arXiv: {active_paper.get('arxivId', '')})\n"
+                )
+            except IndexError:
+                active_paper_block = ""
+        attachment_block = self._format_attachment_block(attachment_paper_ids, exclude_paper_id=active_paper_id)
+        return (
+            f"用户当前请求：{message}\n"
+            f"{active_paper_block}"
+            f"{attachment_block}"
+        )[:12000]
+
+    def _message_for_storage(self, message: str, attachment_paper_ids: list[int] | None = None) -> str:
+        attachment_block = self._format_attachment_block(attachment_paper_ids)
+        if not attachment_block:
+            return message
+        return f"{message}\n\n{attachment_block}"

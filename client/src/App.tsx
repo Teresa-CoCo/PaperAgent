@@ -51,6 +51,9 @@ export default function App() {
   const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
   const [toolCallsBySession, setToolCallsBySession] = useState<Record<string, ToolCallInfo[]>>({});
   const [sessionLoading, setSessionLoading] = useState<Record<string, boolean>>({});
+  const [chatAttachments, setChatAttachments] = useState<Paper[]>([]);
+  const [mentionResults, setMentionResults] = useState<Paper[]>([]);
+  const [mentionOpen, setMentionOpen] = useState(false);
   const streamingSessionsRef = useRef<Set<string>>(new Set());
   const [actionLoading, setActionLoading] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
@@ -96,6 +99,37 @@ export default function App() {
   useEffect(() => {
     void ensureSession(chatMode, activePaper);
   }, [chatMode, activePaper?.id]);
+
+  useEffect(() => {
+    const mentionQuery = extractMentionQuery(input);
+    if (mentionQuery === null) {
+      setMentionResults([]);
+      setMentionOpen(false);
+      return;
+    }
+
+    const trimmed = mentionQuery.trim();
+    if (!trimmed) {
+      const seeds = [activePaper, ...papers].filter(Boolean) as Paper[];
+      const unique = Array.from(new Map(seeds.map((paper) => [paper.id, paper])).values()).slice(0, 6);
+      setMentionResults(unique);
+      setMentionOpen(unique.length > 0);
+      return;
+    }
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await api.listPapers(undefined, trimmed);
+        setMentionResults(result.items.slice(0, 6));
+        setMentionOpen(result.items.length > 0);
+      } catch {
+        setMentionResults([]);
+        setMentionOpen(false);
+      }
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [input, activePaper, papers]);
 
   useEffect(() => {
     const hasActiveJob = crawlJobs.some((job) => job.status === "queued" || job.status === "running");
@@ -189,6 +223,10 @@ export default function App() {
   }
 
   async function ensureSession(mode: ChatMode, paper?: Paper) {
+    if (mode === "paper" && !paper) {
+      setSessionId("");
+      return;
+    }
     try {
       const latest = await api.listSessions();
       const existing = latest.items.find((item) => item.scope === mode && (mode === "ace" || item.paperId === paper?.id));
@@ -445,15 +483,19 @@ export default function App() {
     if (!sessionId || !input.trim()) return;
     const sid = sessionId;
     const content = input;
-    sendMessageInner(sid, content);
+    const attachmentPaperIds = chatAttachments.map((paper) => paper.id);
+    sendMessageInner(sid, content, attachmentPaperIds);
   }
 
-  function sendMessageInner(sid: string, content: string) {
+  function sendMessageInner(sid: string, content: string, attachmentPaperIds: number[]) {
     if (streamingSessionsRef.current.has(sid)) return; // Already streaming
     streamingSessionsRef.current.add(sid);
     setSessionLoading((prev) => ({ ...prev, [sid]: true }));
     setError("");
     setInput("");
+    setMentionResults([]);
+    setMentionOpen(false);
+    setChatAttachments([]);
 
     const userMessage: ChatMessage = {
       id: -Date.now(),
@@ -479,7 +521,7 @@ export default function App() {
     // Run stream in background — don't await
     api.streamMessage(
       sid,
-      { message: content, paperId: activePaper?.id, selection, mode: chatMode },
+      { message: content, paperId: activePaper?.id, selection, attachmentPaperIds, mode: chatMode },
       (event: StreamEvent) => {
         handleStreamEvent(sid, assistantMessage.id, pendingToolCalls, event);
       }
@@ -590,6 +632,30 @@ export default function App() {
     api.approveToolCall(sessionId, toolCallId, approved).catch(() => undefined);
   }
 
+  function extractMentionQuery(value: string) {
+    const lastAt = value.lastIndexOf("@");
+    if (lastAt === -1) return null;
+    if (lastAt > 0 && /\S/.test(value[lastAt - 1])) return null;
+    const tail = value.slice(lastAt + 1);
+    if (tail.includes("\n")) return null;
+    return tail;
+  }
+
+  function attachPaperFromMention(paper: Paper) {
+    setChatAttachments((items) => items.some((item) => item.id === paper.id) ? items : [...items, paper]);
+    setInput((value) => {
+      const lastAt = value.lastIndexOf("@");
+      if (lastAt === -1) return value;
+      return value.slice(0, lastAt).replace(/\s+$/, " ").trimStart();
+    });
+    setMentionResults([]);
+    setMentionOpen(false);
+  }
+
+  function removeChatAttachment(paperId: number) {
+    setChatAttachments((items) => items.filter((paper) => paper.id !== paperId));
+  }
+
   return (
     <div className={`app-shell ${gridClass}`}>
       <Sidebar
@@ -685,17 +751,19 @@ export default function App() {
         mode={chatMode}
         messages={messagesBySession[sessionId] || []}
         toolCalls={toolCallsBySession[sessionId] || []}
-        sessions={sessions}
-        activeSessionId={sessionId}
         input={input}
         selection={selection}
         loading={!!sessionLoading[sessionId]}
+        attachments={chatAttachments}
+        mentionResults={mentionResults}
+        mentionOpen={mentionOpen}
         onToggle={() => setRightCollapsed((value) => !value)}
         onMode={setChatMode}
-        onSession={(id) => void selectSession(id)}
         onInput={setInput}
         onSend={sendMessage}
         onApproveToolCall={(toolCallId, approved) => handleApproveToolCall(toolCallId, approved)}
+        onAttachPaper={attachPaperFromMention}
+        onRemoveAttachment={removeChatAttachment}
       />
     </div>
   );

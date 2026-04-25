@@ -95,9 +95,9 @@ class PaperService:
                 params.extend([start, end])
             where.append("(" + " OR ".join(date_clauses) + ")")
         if query:
-            where.append("(title LIKE ? OR abstract LIKE ? OR ai_summary LIKE ?)")
+            where.append("(title LIKE ? OR abstract LIKE ? OR ai_summary LIKE ? OR authors LIKE ? OR arxiv_id LIKE ?)")
             term = f"%{query}%"
-            params.extend([term, term, term])
+            params.extend([term, term, term, term, term])
         sql = "SELECT * FROM papers"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -116,6 +116,19 @@ class PaperService:
         paper["markdown"] = self.read_markdown(row.get("markdown_path"))
         return paper
 
+    def get_papers_by_ids(self, paper_ids: list[int]) -> list[dict]:
+        unique_ids = [paper_id for paper_id in dict.fromkeys(paper_ids) if isinstance(paper_id, int)]
+        if not unique_ids:
+            return []
+        placeholders = ",".join("?" for _ in unique_ids)
+        with transaction() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM papers WHERE id IN ({placeholders})",
+                unique_ids,
+            ).fetchall()
+        rows_by_id = {row["id"]: row for row in rows}
+        return [paper_to_api(rows_by_id[paper_id]) for paper_id in unique_ids if paper_id in rows_by_id]
+
     def search_local(self, query: str, limit: int = 12) -> list[dict]:
         terms = [token.strip() for token in query.replace("，", " ").replace(",", " ").split() if token.strip()]
         # Keep broad acronyms useful for queries like VLA/RAG/LLM.
@@ -126,9 +139,9 @@ class PaperService:
         where: list[str] = []
         params: list[object] = []
         for keyword in keywords:
-            where.append("(title LIKE ? OR abstract LIKE ? OR ai_summary LIKE ? OR tags LIKE ?)")
+            where.append("(title LIKE ? OR abstract LIKE ? OR ai_summary LIKE ? OR tags LIKE ? OR authors LIKE ? OR arxiv_id LIKE ?)")
             term = f"%{keyword}%"
-            params.extend([term, term, term, term])
+            params.extend([term, term, term, term, term, term])
         sql = "SELECT * FROM papers WHERE " + " OR ".join(where)
         sql += " ORDER BY COALESCE(analyzed_at, updated_at, published_at, created_at) DESC LIMIT ?"
         params.append(limit)

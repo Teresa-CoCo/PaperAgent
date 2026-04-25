@@ -19,6 +19,7 @@ class MessageRequest(BaseModel):
     message: str = Field(min_length=1)
     paperId: int | None = None
     selection: str | None = None
+    attachmentPaperIds: list[int] = Field(default_factory=list)
     mode: str = Field(default="paper", pattern="^(paper|ace)$")
 
 
@@ -47,6 +48,7 @@ async def send_message(
         message=payload.message,
         paper_id=payload.paperId,
         selection=payload.selection,
+        attachment_paper_ids=payload.attachmentPaperIds,
         mode=payload.mode,
     )
 
@@ -62,6 +64,7 @@ async def stream_message(
             message=payload.message,
             paper_id=payload.paperId,
             selection=payload.selection,
+            attachment_paper_ids=payload.attachmentPaperIds,
             mode=payload.mode,
         ):
             yield chunk

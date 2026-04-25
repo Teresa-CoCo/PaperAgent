@@ -1187,39 +1187,6 @@ input:focus, textarea:focus, select:focus {
   flex-shrink: 0;
 }
 
-.session-list {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  flex-shrink: 0;
-  padding-bottom: 2px;
-}
-
-.session-chip {
-  flex-shrink: 0;
-  max-width: 160px;
-  padding: 5px 9px;
-  border-radius: 5px;
-  border: 1px solid var(--border-light);
-  font-size: 0.8rem;
-  color: var(--ink-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  transition: border-color 0.1s;
-  background: var(--surface);
-}
-
-.session-chip:hover {
-  border-color: var(--border);
-}
-
-.session-chip.active {
-  border-color: var(--accent-border);
-  background: var(--accent-light);
-  color: var(--accent);
-}
-
 .message-list {
   flex: 1;
   overflow-y: auto;
@@ -1287,6 +1254,30 @@ input:focus, textarea:focus, select:focus {
   flex-direction: column;
   gap: 8px;
   flex-shrink: 0;
+  position: relative;
+}
+
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attachment-chip {
+  max-width: 100%;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-light);
+  color: var(--accent);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip:hover {
+  filter: brightness(0.98);
 }
 
 .composer textarea {
@@ -1294,6 +1285,45 @@ input:focus, textarea:focus, select:focus {
   min-height: 80px;
   resize: vertical;
   font-size: 0.88rem;
+}
+
+.mention-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+}
+
+.mention-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.mention-option:hover {
+  background: var(--surface-hover);
+}
+
+.mention-title {
+  font-size: 0.84rem;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.mention-meta {
+  font-size: 0.76rem;
+  color: var(--ink-secondary);
 }
 
 .composer button {

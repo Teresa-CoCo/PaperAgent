@@ -1,6 +1,7 @@
+import { useEffect, useRef } from "react";
 import { Panel } from "./Panel";
 import { MarkdownText } from "./MarkdownText";
-import type { ChatMessage, ChatSession, Paper, ToolCallInfo } from "../lib/api";
+import type { ChatMessage, Paper, ToolCallInfo } from "../lib/api";
 
 type Props = {
   collapsed: boolean;
@@ -8,17 +9,19 @@ type Props = {
   mode: "paper" | "ace";
   messages: ChatMessage[];
   toolCalls: ToolCallInfo[];
-  sessions: ChatSession[];
-  activeSessionId: string;
   input: string;
   selection: string;
   loading: boolean;
+  attachments: Paper[];
+  mentionResults: Paper[];
+  mentionOpen: boolean;
   onToggle: () => void;
   onMode: (mode: "paper" | "ace") => void;
-  onSession: (sessionId: string) => void;
   onInput: (value: string) => void;
   onSend: () => void;
   onApproveToolCall: (toolCallId: string, approved: boolean) => void;
+  onAttachPaper: (paper: Paper) => void;
+  onRemoveAttachment: (paperId: number) => void;
 };
 
 function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
@@ -92,19 +95,28 @@ export function ChatPanel({
   mode,
   messages,
   toolCalls,
-  sessions,
-  activeSessionId,
   input,
   selection,
   loading,
+  attachments,
+  mentionResults,
+  mentionOpen,
   onToggle,
   onMode,
-  onSession,
   onInput,
   onSend,
-  onApproveToolCall
+  onApproveToolCall,
+  onAttachPaper,
+  onRemoveAttachment
 }: Props) {
   const pendingApproval = toolCalls.find((tc) => tc.summary?.startsWith("⚠️ 需要批准"));
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const node = messageListRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [messages, toolCalls, loading]);
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -148,19 +160,7 @@ export function ChatPanel({
             {mode === "paper" && activePaper ? activePaper.title : "探索研究方向、检索网页并推荐数据库内论文"}
           </div>
 
-          <div className="session-list">
-            {sessions.slice(0, 8).map((session) => (
-              <button
-                key={session.id}
-                className={session.id === activeSessionId ? "session-chip active" : "session-chip"}
-                onClick={() => onSession(session.id)}
-              >
-                {session.title || session.scope}
-              </button>
-            ))}
-          </div>
-
-          <div className="message-list">
+          <div className="message-list" ref={messageListRef}>
             {messages.length === 0 && <p className="muted">对论文选区提问，或让 Ace 推荐下一批论文。</p>}
             {messages.map((message, index) => (
               <div key={message.id}>
@@ -188,13 +188,46 @@ export function ChatPanel({
           {selection && <div className="selected-snippet">{selection.slice(0, 180)}</div>}
 
           <div className="composer">
+            {attachments.length > 0 && (
+              <div className="chat-attachments">
+                {attachments.map((paper) => (
+                  <button
+                    key={paper.id}
+                    type="button"
+                    className="attachment-chip"
+                    onClick={() => onRemoveAttachment(paper.id)}
+                    title={paper.title}
+                  >
+                    @{paper.arxivId || paper.title}
+                  </button>
+                ))}
+              </div>
+            )}
             <textarea
               value={input}
-              placeholder={mode === "paper" ? "基于全文或选区提问" : "描述你的研究兴趣"}
+              placeholder={mode === "paper" ? "基于全文或选区提问，或输入 @论文/作者/arXiv 编号附加参考" : "描述你的研究兴趣，或输入 @论文/作者/arXiv 编号附加参考"}
               onChange={(event) => onInput(event.target.value)}
               onKeyDown={handleKeyDown}
             />
-            <button onClick={onSend} disabled={loading || !input.trim()}>
+            {mentionOpen && mentionResults.length > 0 && (
+              <div className="mention-menu">
+                {mentionResults.slice(0, 6).map((paper) => (
+                  <button
+                    key={paper.id}
+                    type="button"
+                    className="mention-option"
+                    onClick={() => onAttachPaper(paper)}
+                  >
+                    <span className="mention-title">{paper.title}</span>
+                    <span className="mention-meta">
+                      {paper.arxivId}
+                      {paper.authors?.length ? ` · ${paper.authors.slice(0, 2).join(", ")}` : ""}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button onClick={onSend} disabled={loading || !input.trim() || (mode === "paper" && !activePaper)}>
               发送
             </button>
           </div>
