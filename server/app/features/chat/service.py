@@ -6,6 +6,7 @@ from datetime import date
 
 from app.db.connection import transaction
 from app.core.errors import AppError
+from app.features.chat.agents import PAPER_ACE_AGENT_CHARTER, agent_catalog, select_agents
 from app.features.papers.arxiv_tool import ArxivTool
 from app.features.papers.service import PaperService
 from app.features.tools.brave_search import BraveSearchTool
@@ -24,6 +25,7 @@ from app.features.users.service import UserPreferenceService, ensure_user
 
 MAX_TOOL_TURNS = 6
 _mission_queue_lock = asyncio.Lock()
+PAPER_ACE_SCOPE = "paper_ace"
 
 
 class ChatService:
@@ -49,6 +51,7 @@ class ChatService:
 
     def create_session(self, user_id: str, scope: str, paper_id: int | None = None, title: str = "") -> dict:
         ensure_user(user_id)
+        scope = self._normalize_mode(scope)
         session_id = str(uuid.uuid4())
         with transaction() as connection:
             connection.execute(
@@ -56,9 +59,9 @@ class ChatService:
                 INSERT INTO chat_sessions(id, user_id, scope, paper_id, title)
                 VALUES(?, ?, ?, ?, ?)
                 """,
-                (session_id, user_id, scope, paper_id, title),
+                (session_id, user_id, scope, paper_id, title or "Paper Ace Paper"),
             )
-        return {"id": session_id, "scope": scope, "paperId": paper_id, "title": title}
+        return {"id": session_id, "scope": scope, "paperId": paper_id, "title": title or "Paper Ace Paper"}
 
     def list_sessions(self, user_id: str) -> list[dict]:
         ensure_user(user_id)
@@ -153,6 +156,7 @@ class ChatService:
         attachment_paper_ids: list[int] | None = None,
         mode: str = "paper",
     ) -> dict:
+        mode = self._normalize_mode(mode)
         ensure_user(user_id)
         self.preferences.update_from_text(user_id, message)
         stored_message = self._message_for_storage(message, attachment_paper_ids)
@@ -163,22 +167,14 @@ class ChatService:
             )
         session_history = self._recent_session_messages(session_id)
 
-        if mode == "ace":
-            answer = await self._ace_reply(
-                user_id,
-                message,
-                session_history=session_history,
-                active_paper_id=paper_id,
-                attachment_paper_ids=attachment_paper_ids,
-            )
-        else:
-            answer = await self._paper_reply(
-                message,
-                paper_id,
-                selection,
-                session_history=session_history,
-                attachment_paper_ids=attachment_paper_ids,
-            )
+        answer = await self._paper_ace_reply(
+            user_id,
+            message,
+            paper_id=paper_id,
+            selection=selection,
+            session_history=session_history,
+            attachment_paper_ids=attachment_paper_ids,
+        )
 
         with transaction() as connection:
             connection.execute(
@@ -205,6 +201,7 @@ class ChatService:
         attachment_paper_ids: list[int] | None = None,
         mode: str = "paper",
     ) -> dict:
+        mode = self._normalize_mode(mode)
         ensure_user(user_id)
         attachment_paper_ids = attachment_paper_ids or []
         with transaction() as connection:
@@ -339,6 +336,7 @@ class ChatService:
         attachment_paper_ids: list[int] | None = None,
         mode: str = "paper",
     ) -> AsyncIterator[str]:
+        mode = self._normalize_mode(mode)
         ensure_user(user_id)
         self.preferences.update_from_text(user_id, message)
         stored_message = self._message_for_storage(message, attachment_paper_ids)
@@ -351,27 +349,16 @@ class ChatService:
 
         text_chunks: list[str] = []
         try:
-            if mode == "ace":
-                async for event in self._stream_ace_ndjson(
-                    user_id,
-                    message,
-                    session_history=session_history,
-                    active_paper_id=paper_id,
-                    attachment_paper_ids=attachment_paper_ids,
-                ):
-                    text_chunks = self._accumulate_text(event, text_chunks)
-                    yield event + "\n"
-            else:
-                fallback_answer = self._local_answer(user_id, message) if mode == "ace" else ""
-                async for event in self._stream_paper_ndjson(
-                    message,
-                    paper_id,
-                    selection,
-                    session_history=session_history,
-                    attachment_paper_ids=attachment_paper_ids,
-                ):
-                    text_chunks = self._accumulate_text(event, text_chunks)
-                    yield event + "\n"
+            async for event in self._stream_paper_ace_ndjson(
+                user_id,
+                message,
+                paper_id=paper_id,
+                selection=selection,
+                session_history=session_history,
+                attachment_paper_ids=attachment_paper_ids,
+            ):
+                text_chunks = self._accumulate_text(event, text_chunks)
+                yield event + "\n"
         except Exception as exc:
             user_message = self._user_facing_error(exc)
             error_event = json.dumps({"type": "error", "message": user_message}, ensure_ascii=False)
@@ -399,6 +386,11 @@ class ChatService:
         except json.JSONDecodeError:
             pass
         return text_chunks
+
+    def _chunk_text(self, text: str, size: int = 56) -> list[str]:
+        if not text:
+            return []
+        return [text[index : index + size] for index in range(0, len(text), size)]
 
     # ------------------------------------------------------------------
     # Paper mode (uses RAG context — no tools)
@@ -438,7 +430,290 @@ class ChatService:
         return response.content
 
     # ------------------------------------------------------------------
-    # Ace mode — tool-calling agent
+    # Paper Ace Paper — six-agent tool-calling entrypoint
+    # ------------------------------------------------------------------
+
+    def agents(self) -> list[dict]:
+        return agent_catalog()
+
+    async def _stream_paper_ace_ndjson(
+        self,
+        user_id: str,
+        message: str,
+        paper_id: int | None,
+        selection: str | None,
+        session_history: list[dict],
+        attachment_paper_ids: list[int] | None = None,
+    ) -> AsyncIterator[str]:
+        selected_agents = select_agents(message, has_long_history=len(session_history) >= 12)
+        for agent in selected_agents:
+            yield json.dumps(
+                {
+                    "type": "agent_start",
+                    "agentKey": agent.key,
+                    "agentName": agent.name,
+                    "summary": agent.when_to_use,
+                },
+                ensure_ascii=False,
+            )
+
+        messages = self._paper_ace_initial_messages(
+            user_id,
+            message,
+            paper_id=paper_id,
+            selection=selection,
+            session_history=session_history,
+            attachment_paper_ids=attachment_paper_ids,
+            selected_agent_keys=[agent.key for agent in selected_agents],
+        )
+        tools = tool_definitions()
+        ctx = self._tool_ctx(user_id)
+
+        for turn in range(MAX_TOOL_TURNS):
+            response: LLMResponse = await self.llm.complete(
+                f"paper-ace-tool-loop-{turn}",
+                messages,
+                use_cache=False,
+                tools=tools,
+            )
+
+            if not response.tool_calls:
+                for agent in selected_agents:
+                    yield json.dumps(
+                        {
+                            "type": "agent_result",
+                            "agentKey": agent.key,
+                            "agentName": agent.name,
+                            "summary": "本轮工作完成，最终回答已按可用证据生成。",
+                        },
+                        ensure_ascii=False,
+                    )
+                for chunk in self._chunk_text(response.content):
+                    yield json.dumps({"type": "text", "content": chunk}, ensure_ascii=False)
+                yield json.dumps({"type": "done"})
+                return
+
+            messages.append(
+                ChatMessage(
+                    role="assistant",
+                    content=response.content or "",
+                    tool_calls=[
+                        {"id": t.id, "type": "function", "function": t.function}
+                        for t in response.tool_calls
+                    ],
+                )
+            )
+
+            for tc in response.tool_calls:
+                func_name = tc.function["name"]
+                func_args = tc.function["arguments"]
+
+                yield json.dumps(
+                    {
+                        "type": "tool_start",
+                        "toolCallId": tc.id,
+                        "name": func_name,
+                        "arguments": func_args,
+                    },
+                    ensure_ascii=False,
+                )
+
+                if func_name == "shell_execute":
+                    try:
+                        args = json.loads(func_args) if func_args else {}
+                        command = args.get("command", "")
+                    except (json.JSONDecodeError, TypeError):
+                        command = ""
+                    danger = is_dangerous_command(command)
+                    if danger:
+                        register_approval(tc.id, command)
+                        yield json.dumps(
+                            {
+                                "type": "approval",
+                                "toolCallId": tc.id,
+                                "command": command,
+                                "reason": danger,
+                            },
+                            ensure_ascii=False,
+                        )
+                        await await_approval(tc.id).wait()
+                        approved = approval_decision(tc.id)
+                        cleanup_approval(tc.id)
+                        if not approved:
+                            yield json.dumps(
+                                {
+                                    "type": "tool_result",
+                                    "toolCallId": tc.id,
+                                    "name": func_name,
+                                    "summary": "⚠️ Command execution denied by user",
+                                },
+                                ensure_ascii=False,
+                            )
+                            messages.append(
+                                ChatMessage(
+                                    role="tool",
+                                    content=json.dumps({"status": "denied", "command": command}, ensure_ascii=False),
+                                    tool_call_id=tc.id,
+                                )
+                            )
+                            continue
+
+                try:
+                    tool_result = await execute_tool(func_name, func_args, ctx)
+                    parsed_result = json.loads(tool_result)
+                except Exception as exc:
+                    parsed_result = {"error": f"Tool execution failed: {exc}"}
+
+                summary = self._tool_result_summary(func_name, parsed_result)
+                yield json.dumps(
+                    {
+                        "type": "tool_result",
+                        "toolCallId": tc.id,
+                        "name": func_name,
+                        "summary": summary,
+                    },
+                    ensure_ascii=False,
+                )
+
+                messages.append(
+                    ChatMessage(
+                        role="tool",
+                        content=json.dumps(parsed_result, ensure_ascii=False),
+                        tool_call_id=tc.id,
+                    )
+                )
+        else:
+            msg = "工具调用次数已达上限，基于已有信息回答，并标明未完成的核验风险。"
+            messages.append(ChatMessage("assistant", msg))
+
+        for agent in selected_agents:
+            yield json.dumps(
+                {
+                    "type": "agent_result",
+                    "agentKey": agent.key,
+                    "agentName": agent.name,
+                    "summary": "本轮工作完成，最终回答将标明未完成的核验风险。",
+                },
+                ensure_ascii=False,
+            )
+        async for chunk in self.llm.stream(messages):
+            yield json.dumps({"type": "text", "content": chunk}, ensure_ascii=False)
+        yield json.dumps({"type": "done"})
+
+    async def _paper_ace_reply(
+        self,
+        user_id: str,
+        message: str,
+        paper_id: int | None,
+        selection: str | None,
+        session_history: list[dict],
+        attachment_paper_ids: list[int] | None = None,
+    ) -> str:
+        messages = self._paper_ace_initial_messages(
+            user_id,
+            message,
+            paper_id=paper_id,
+            selection=selection,
+            session_history=session_history,
+            attachment_paper_ids=attachment_paper_ids,
+            selected_agent_keys=[agent.key for agent in select_agents(message, has_long_history=len(session_history) >= 12)],
+        )
+        tools = tool_definitions()
+        ctx = self._tool_ctx(user_id)
+
+        for turn in range(MAX_TOOL_TURNS):
+            response = await self.llm.complete(
+                f"paper-ace-reply-tool-{turn}",
+                messages,
+                use_cache=False,
+                tools=tools,
+            )
+            if not response.tool_calls:
+                return response.content
+
+            messages.append(
+                ChatMessage(
+                    role="assistant",
+                    content=response.content or "",
+                    tool_calls=[
+                        {"id": t.id, "type": "function", "function": t.function}
+                        for t in response.tool_calls
+                    ],
+                )
+            )
+            for tc in response.tool_calls:
+                tool_result = await execute_tool(tc.function["name"], tc.function["arguments"], ctx)
+                messages.append(ChatMessage(role="tool", content=tool_result, tool_call_id=tc.id))
+        return "工具调用次数已达上限，基于已有信息回答，并标明未完成的核验风险。"
+
+    def _paper_ace_initial_messages(
+        self,
+        user_id: str,
+        message: str,
+        paper_id: int | None,
+        selection: str | None,
+        session_history: list[dict],
+        attachment_paper_ids: list[int] | None = None,
+        selected_agent_keys: list[str] | None = None,
+    ) -> list[ChatMessage]:
+        context_chunks = self.papers.retrieve_context(paper_id, message if message.strip() else selection or "") if paper_id else []
+        return [
+            ChatMessage("system", PAPER_ACE_AGENT_CHARTER),
+            ChatMessage(
+                "system",
+                (
+                    f"Runtime date: {date.today().isoformat()}.\n"
+                    f"Current user id: {user_id}.\n"
+                    f"Active agent keys for this turn: {', '.join(selected_agent_keys or [])}.\n"
+                    "Maintain the exact stable charter above as reusable context; put volatile date, user, paper, and request data here."
+                ),
+            ),
+            *self._history_to_chat_messages(session_history[:-1]),
+            ChatMessage(
+                "user",
+                self._paper_ace_user_prompt(
+                    message,
+                    paper_id=paper_id,
+                    selection=selection,
+                    context_chunks=context_chunks,
+                    attachment_paper_ids=attachment_paper_ids,
+                ),
+            ),
+        ]
+
+    def _paper_ace_user_prompt(
+        self,
+        message: str,
+        paper_id: int | None,
+        selection: str | None,
+        context_chunks: list[str],
+        attachment_paper_ids: list[int] | None = None,
+    ) -> str:
+        focused_paper = ""
+        if paper_id:
+            try:
+                paper = self.papers.get_papers_by_ids([paper_id])[0]
+                focused_paper = (
+                    "当前界面焦点论文：\n"
+                    f"- DB paper_id={paper['id']} | {paper['title']} | arXiv: {paper.get('arxivId', '')}\n"
+                    f"- 摘要: {(paper.get('aiSummary') or paper.get('abstract') or '')[:900]}\n"
+                )
+            except IndexError:
+                focused_paper = f"当前界面焦点论文 ID：{paper_id}（数据库未返回详情）\n"
+        selection_block = f"\n用户当前选中的原文片段：\n{selection[:3000]}\n" if selection else ""
+        attachment_block = self._format_attachment_block(attachment_paper_ids, exclude_paper_id=paper_id)
+        retrieval_block = "\n---\n".join(context_chunks) if context_chunks else "无当前焦点论文 RAG 片段；如需要证据，请调用 search_database/search_rag_database/arxiv_search/web_search。"
+        return (
+            f"用户当前请求：{message}\n"
+            f"{focused_paper}"
+            f"{selection_block}"
+            f"{attachment_block}\n"
+            "当前焦点论文 RAG 预取片段：\n"
+            f"{retrieval_block}"
+        )[:16000]
+
+    # ------------------------------------------------------------------
+    # Ace mode — legacy tool-calling agent kept for existing callers
     # ------------------------------------------------------------------
 
     async def _stream_ace_ndjson(
@@ -686,7 +961,7 @@ class ChatService:
     def _user_facing_error(self, exc: Exception) -> str:
         message = str(exc).strip()
         if exc.__class__.__name__ == "HTTPStatusError":
-            return "模型服务请求失败，Ace Chat 本轮没有生成结果。已修正工具调用链后请重试；如果仍失败，请检查 LLM 接口配置。"
+            return "模型服务请求失败，Paper Ace Paper 本轮没有生成结果。请重试；如果仍失败，请检查 LLM 接口配置。"
         if message:
             return f"生成失败：{message}"
         return "生成失败：外部服务连接异常"
@@ -850,3 +1125,8 @@ class ChatService:
         if not attachment_block:
             return message
         return f"{message}\n\n{attachment_block}"
+
+    def _normalize_mode(self, mode: str | None) -> str:
+        if mode in {"paper", "ace", PAPER_ACE_SCOPE}:
+            return PAPER_ACE_SCOPE
+        return PAPER_ACE_SCOPE

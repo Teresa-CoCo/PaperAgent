@@ -11,7 +11,7 @@ missions_router = APIRouter(prefix="/api/missions", tags=["missions"])
 
 
 class SessionRequest(BaseModel):
-    scope: str = Field(pattern="^(paper|ace)$")
+    scope: str = Field(default="paper_ace", pattern="^(paper|ace|paper_ace)$")
     paperId: int | None = None
     title: str = ""
 
@@ -21,7 +21,7 @@ class MessageRequest(BaseModel):
     paperId: int | None = None
     selection: str | None = None
     attachmentPaperIds: list[int] = Field(default_factory=list)
-    mode: str = Field(default="paper", pattern="^(paper|ace)$")
+    mode: str = Field(default="paper_ace", pattern="^(paper|ace|paper_ace)$")
 
 
 @router.post("/sessions")
@@ -32,6 +32,11 @@ def create_session(payload: SessionRequest, user_id: str = Depends(current_user_
 @router.get("/sessions")
 def list_sessions(user_id: str = Depends(current_user_id)) -> dict:
     return {"items": ChatService().list_sessions(user_id)}
+
+
+@router.get("/agents")
+def list_agents(_: str = Depends(current_user_id)) -> dict:
+    return {"items": ChatService().agents()}
 
 
 @router.get("/sessions/{session_id}/messages")

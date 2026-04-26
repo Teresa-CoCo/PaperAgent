@@ -6,10 +6,10 @@ import { PaperList } from "./components/PaperList";
 import { PaperViewer } from "./components/PaperViewer";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar, type LibraryMode } from "./components/Sidebar";
-import { api, type ChatMessage, type ChatMission, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper, type StreamEvent, type ToolCallInfo } from "./lib/api";
+import { api, type AgentActivity, type AgentInfo, type ChatMessage, type ChatMission, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper, type StreamEvent, type ToolCallInfo } from "./lib/api";
 
 type ViewMode = "summary" | "markdown" | "pdf";
-type ChatMode = "paper" | "ace";
+type ChatMode = "paper_ace";
 
 function yesterdayString() {
   const target = new Date();
@@ -25,7 +25,7 @@ export default function App() {
   const [activePaper, setActivePaper] = useState<Paper | undefined>();
   const [quota, setQuota] = useState<OcrQuota | undefined>();
   const [viewMode, setViewMode] = useState<ViewMode>("summary");
-  const [chatMode, setChatMode] = useState<ChatMode>("paper");
+  const [chatMode] = useState<ChatMode>("paper_ace");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [sessionId, setSessionId] = useState<string>("");
@@ -52,6 +52,8 @@ export default function App() {
   const [dailyGenerating, setDailyGenerating] = useState(false);
   const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
   const [toolCallsBySession, setToolCallsBySession] = useState<Record<string, ToolCallInfo[]>>({});
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [agentActivitiesBySession, setAgentActivitiesBySession] = useState<Record<string, AgentActivity[]>>({});
   const [sessionLoading, setSessionLoading] = useState<Record<string, boolean>>({});
   const [chatAttachments, setChatAttachments] = useState<Paper[]>([]);
   const [mentionResults, setMentionResults] = useState<Paper[]>([]);
@@ -81,6 +83,7 @@ export default function App() {
     api.quota().then(setQuota).catch(() => undefined);
     api.favoriteFolders().then((data) => setFolders(data.items)).catch(() => undefined);
     api.listSessions().then((data) => setSessions(data.items)).catch(() => undefined);
+    api.agents().then((data) => setAgents(data.items)).catch(() => undefined);
     api.crawlJobs().then((data) => setCrawlJobs(data.items)).catch(() => undefined);
     api.dailyPaperRuns().then((data) => setDailyRuns(data.items)).catch(() => undefined);
   }, []);
@@ -100,7 +103,7 @@ export default function App() {
 
   useEffect(() => {
     void ensureSession(chatMode, activePaper);
-  }, [chatMode, activePaper?.id]);
+  }, [chatMode]);
 
   useEffect(() => {
     const mentionQuery = extractMentionQuery(input);
@@ -243,21 +246,17 @@ export default function App() {
   }
 
   async function ensureSession(mode: ChatMode, paper?: Paper) {
-    if (mode === "paper" && !paper) {
-      setSessionId("");
-      return;
-    }
     try {
       const latest = await api.listSessions();
-      const existing = latest.items.find((item) => item.scope === mode && (mode === "ace" || item.paperId === paper?.id));
+      const existing = latest.items.find((item) => item.scope === mode);
       if (existing) {
         await selectSession(existing.id);
         setSessions(latest.items);
         return;
       }
-      const session = await api.createSession(mode, paper?.id, paper?.title || mode);
+      const session = await api.createSession(mode, paper?.id, "Paper Ace Paper");
       setSessionId(session.id);
-      setSessions([{ id: session.id, scope: mode, paperId: paper?.id, title: paper?.title || mode, updatedAt: new Date().toISOString() }, ...latest.items]);
+      setSessions([{ id: session.id, scope: mode, paperId: paper?.id, title: "Paper Ace Paper", updatedAt: new Date().toISOString() }, ...latest.items]);
     } catch (reason) {
       setError((reason as Error).message);
     }
@@ -275,8 +274,7 @@ export default function App() {
   async function openHistorySession(session: ChatSession) {
     setError("");
     try {
-      setChatMode(session.scope);
-      if (session.scope === "paper" && session.paperId && activePaper?.id !== session.paperId) {
+      if ((session.scope === "paper" || session.scope === "paper_ace") && session.paperId && activePaper?.id !== session.paperId) {
         const paper = await api.getPaper(session.paperId);
         setActivePaper(paper);
         setViewMode("summary");
@@ -289,13 +287,9 @@ export default function App() {
   }
 
   async function createNewChatSession() {
-    if (chatMode === "paper" && !activePaper) {
-      setError("请先选择一篇论文再新建 Paper Chat。");
-      return;
-    }
     setError("");
     try {
-      const title = chatMode === "paper" ? activePaper?.title || "Paper Chat" : "Ace Chat";
+      const title = "Paper Ace Paper";
       const session = await api.createSession(chatMode, activePaper?.id, title);
       const next: ChatSession = {
         id: session.id,
@@ -309,6 +303,7 @@ export default function App() {
       setSessionId(session.id);
       setMessagesBySession((prev) => ({ ...prev, [session.id]: [] }));
       setToolCallsBySession((prev) => ({ ...prev, [session.id]: [] }));
+      setAgentActivitiesBySession((prev) => ({ ...prev, [session.id]: [] }));
       setSessions((items) => [next, ...items]);
       setHistoryOpen(false);
     } catch (reason) {
@@ -317,7 +312,7 @@ export default function App() {
   }
 
   async function deleteHistorySession(session: ChatSession) {
-    const label = session.title || (session.scope === "paper" ? "Paper Chat" : "Ace Chat");
+    const label = session.title || "Paper Ace Paper";
     const confirmed = window.confirm(`删除「${label}」这条会话历史？此操作不能撤销。`);
     if (!confirmed) return;
     setError("");
@@ -335,6 +330,11 @@ export default function App() {
         delete next[session.id];
         return next;
       });
+      setAgentActivitiesBySession((prev) => {
+        const next = { ...prev };
+        delete next[session.id];
+        return next;
+      });
       if (session.id === sessionId) {
         const nextSession = remaining[0];
         if (nextSession) {
@@ -343,6 +343,7 @@ export default function App() {
           setSessionId("");
           setMessagesBySession({});
           setToolCallsBySession({});
+          setAgentActivitiesBySession({});
         }
       }
     } catch (reason) {
@@ -641,6 +642,7 @@ export default function App() {
       [sid]: [...(prev[sid] || []), userMessage, assistantMessage]
     }));
     setToolCallsBySession((prev) => ({ ...prev, [sid]: [] }));
+    setAgentActivitiesBySession((prev) => ({ ...prev, [sid]: [] }));
 
     // Run stream in background — don't await
     api.streamMessage(
@@ -670,6 +672,29 @@ export default function App() {
             )
           };
         });
+        break;
+      case "agent_start": {
+        const activity: AgentActivity = {
+          agentKey: event.agentKey,
+          agentName: event.agentName,
+          status: "running",
+          summary: event.summary
+        };
+        setAgentActivitiesBySession((prev) => ({
+          ...prev,
+          [sid]: [...(prev[sid] || []).filter((item) => item.agentKey !== event.agentKey), activity]
+        }));
+        break;
+      }
+      case "agent_result":
+        setAgentActivitiesBySession((prev) => ({
+          ...prev,
+          [sid]: (prev[sid] || []).map((item) =>
+            item.agentKey === event.agentKey
+              ? { ...item, status: "done", summary: event.summary }
+              : item
+          )
+        }));
         break;
       case "tool_start": {
         const info: ToolCallInfo = {
@@ -872,8 +897,9 @@ export default function App() {
       <ChatPanel
         collapsed={rightCollapsed}
         activePaper={activePaper}
-        mode={chatMode}
         messages={messagesBySession[sessionId] || []}
+        agents={agents}
+        agentActivities={agentActivitiesBySession[sessionId] || []}
         toolCalls={toolCallsBySession[sessionId] || []}
         input={input}
         selection={selection}
@@ -883,7 +909,6 @@ export default function App() {
         mentionOpen={mentionOpen}
         onToggle={() => setRightCollapsed((value) => !value)}
         onHistory={() => setHistoryOpen(true)}
-        onMode={setChatMode}
         onInput={setInput}
         onSend={sendMessage}
         onSubmitMission={submitBackgroundMission}

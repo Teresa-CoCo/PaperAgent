@@ -1,13 +1,14 @@
 import { useEffect, useRef } from "react";
 import { Panel } from "./Panel";
 import { MarkdownText } from "./MarkdownText";
-import type { ChatMessage, Paper, ToolCallInfo } from "../lib/api";
+import type { AgentActivity, AgentInfo, ChatMessage, Paper, ToolCallInfo } from "../lib/api";
 
 type Props = {
   collapsed: boolean;
   activePaper?: Paper;
-  mode: "paper" | "ace";
   messages: ChatMessage[];
+  agents: AgentInfo[];
+  agentActivities: AgentActivity[];
   toolCalls: ToolCallInfo[];
   input: string;
   selection: string;
@@ -17,7 +18,6 @@ type Props = {
   mentionOpen: boolean;
   onToggle: () => void;
   onHistory: () => void;
-  onMode: (mode: "paper" | "ace") => void;
   onInput: (value: string) => void;
   onSend: () => void;
   onSubmitMission: () => void;
@@ -71,6 +71,24 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
   );
 }
 
+function AgentDock({ agents, activities }: { agents: AgentInfo[]; activities: AgentActivity[] }) {
+  const activityByKey = new Map(activities.map((activity) => [activity.agentKey, activity]));
+  return (
+    <div className="agent-dock" aria-label="Paper Ace Paper agents">
+      {agents.map((agent) => {
+        const activity = activityByKey.get(agent.key);
+        return (
+          <div key={agent.key} className={`agent-pill ${activity?.status || "idle"}`} title={agent.purpose}>
+            <span className="agent-dot" />
+            <span>{agent.name.replace(" Agent", "")}</span>
+            {activity && <small>{activity.status === "running" ? "工作中" : "已核验"}</small>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ApprovalDialog({ toolCall, onApprove, onDeny }: {
   toolCall: ToolCallInfo;
   onApprove: () => void;
@@ -94,8 +112,9 @@ function ApprovalDialog({ toolCall, onApprove, onDeny }: {
 export function ChatPanel({
   collapsed,
   activePaper,
-  mode,
   messages,
+  agents,
+  agentActivities,
   toolCalls,
   input,
   selection,
@@ -105,7 +124,6 @@ export function ChatPanel({
   mentionOpen,
   onToggle,
   onHistory,
-  onMode,
   onInput,
   onSend,
   onSubmitMission,
@@ -120,7 +138,7 @@ export function ChatPanel({
     const node = messageListRef.current;
     if (!node) return;
     node.scrollTop = node.scrollHeight;
-  }, [messages, toolCalls, loading]);
+  }, [messages, toolCalls, agentActivities, loading]);
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -148,29 +166,23 @@ export function ChatPanel({
           <div className="chat-head">
             <div>
               <p className="eyebrow">Chat</p>
-              <h2>{mode === "paper" ? "Paper Chat" : "Ace Chat"}</h2>
+              <h2>Paper Ace Paper</h2>
             </div>
             <div className="chat-head-actions">
               <button type="button" className="history-open-button" onClick={onHistory}>
                 历史
               </button>
-              <div className="mode-tabs compact">
-                <button className={mode === "paper" ? "active" : ""} onClick={() => onMode("paper")}>
-                  Paper
-                </button>
-                <button className={mode === "ace" ? "active" : ""} onClick={() => onMode("ace")}>
-                  Ace
-                </button>
-              </div>
             </div>
           </div>
 
           <div className="chat-context">
-            {mode === "paper" && activePaper ? activePaper.title : "探索研究方向、检索网页并推荐数据库内论文"}
+            {activePaper ? activePaper.title : "统一入口：论文 RAG、数据库检索、arXiv/Web 搜索、推荐与核验"}
           </div>
 
+          <AgentDock agents={agents} activities={agentActivities} />
+
           <div className="message-list" ref={messageListRef}>
-            {messages.length === 0 && <p className="muted">对论文选区提问，或让 Ace 推荐下一批论文。</p>}
+            {messages.length === 0 && <p className="muted">对论文、选区、研究方向或最新论文提问；系统会显示正在使用的 Agent 和工具。</p>}
             {messages.map((message, index) => (
               <div key={message.id}>
                 <div className={`message ${message.role}`}>
@@ -214,7 +226,7 @@ export function ChatPanel({
             )}
             <textarea
               value={input}
-              placeholder={mode === "paper" ? "基于全文或选区提问，或输入 @论文/作者/arXiv 编号附加参考" : "描述你的研究兴趣，或输入 @论文/作者/arXiv 编号附加参考"}
+              placeholder="询问论文、方向、推荐或最新进展；输入 @论文/作者/arXiv 编号附加参考"
               onChange={(event) => onInput(event.target.value)}
               onKeyDown={handleKeyDown}
             />
@@ -241,11 +253,11 @@ export function ChatPanel({
                 type="button"
                 className="secondary-send-button"
                 onClick={onSubmitMission}
-                disabled={loading || !input.trim() || (mode === "paper" && !activePaper)}
+                disabled={loading || !input.trim()}
               >
                 后台
               </button>
-              <button onClick={onSend} disabled={loading || !input.trim() || (mode === "paper" && !activePaper)}>
+              <button onClick={onSend} disabled={loading || !input.trim()}>
                 发送
               </button>
             </div>

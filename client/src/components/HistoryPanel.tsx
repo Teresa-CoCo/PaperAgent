@@ -31,6 +31,11 @@ function missionLabel(session: ChatSession) {
   return "后台失败";
 }
 
+function sessionScopeLabel(session: ChatSession) {
+  if (session.scope === "paper_ace") return "Paper Ace Paper";
+  return session.scope === "paper" ? "Legacy Paper" : "Legacy Ace";
+}
+
 export function HistoryPanel({ open, sessions, activeSessionId, onClose, onSelect, onNewSession, onDeleteSession }: Props) {
   return (
     <aside className={`history-panel ${open ? "is-open" : ""}`} aria-hidden={!open}>
@@ -64,11 +69,11 @@ export function HistoryPanel({ open, sessions, activeSessionId, onClose, onSelec
               }}
             >
               <span className="history-row">
-                <strong>{session.title || (session.scope === "paper" ? "Paper Chat" : "Ace Chat")}</strong>
+                <strong>{session.title || "Paper Ace Paper"}</strong>
                 <span>{formatDate(session.updatedAt || session.createdAt)}</span>
               </span>
               <span className="history-meta">
-                {session.scope === "paper" ? "Paper" : "Ace"}
+                {sessionScopeLabel(session)}
                 {status ? ` · ${status}` : ""}
               </span>
               <span className="history-preview">

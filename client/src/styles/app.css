@@ -1206,6 +1206,68 @@ input:focus, textarea:focus, select:focus {
   flex-shrink: 0;
 }
 
+.agent-dock {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.agent-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-light);
+  background: var(--surface-hover);
+  color: var(--ink-secondary);
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
+.agent-pill > span:not(.agent-dot) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-pill small {
+  margin-left: auto;
+  color: var(--ink-tertiary);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--ink-tertiary);
+  flex-shrink: 0;
+}
+
+.agent-pill.running {
+  border-color: var(--accent-border);
+  background: var(--accent-light);
+  color: var(--ink);
+}
+
+.agent-pill.running .agent-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-light);
+}
+
+.agent-pill.done {
+  border-color: rgba(34, 197, 94, 0.25);
+  background: rgba(34, 197, 94, 0.06);
+}
+
+.agent-pill.done .agent-dot {
+  background: #22c55e;
+}
+
 .message-list {
   flex: 1;
   overflow-y: auto;

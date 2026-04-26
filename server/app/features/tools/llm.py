@@ -198,8 +198,9 @@ class LLMClient:
     async def stream(self, messages: list[ChatMessage]) -> AsyncIterator[str]:
         if not self.settings.llm_api_key:
             fallback = await self.complete("stream-fallback", messages, use_cache=False)
-            for index in range(0, len(fallback), 48):
-                yield fallback[index : index + 48]
+            fallback_text = fallback.content
+            for index in range(0, len(fallback_text), 48):
+                yield fallback_text[index : index + 48]
             return
 
         headers = {

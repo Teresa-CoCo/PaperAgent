@@ -3,6 +3,8 @@ const USER_ID = import.meta.env.VITE_USER_ID || "local-user";
 
 export type StreamEvent =
   | { type: "text"; content: string }
+  | { type: "agent_start"; agentKey: string; agentName: string; summary: string }
+  | { type: "agent_result"; agentKey: string; agentName: string; summary: string }
   | { type: "tool_start"; toolCallId: string; name: string; arguments: string }
   | { type: "tool_result"; toolCallId: string; name: string; summary: string }
   | { type: "approval"; toolCallId: string; command: string; reason: string }
@@ -15,6 +17,20 @@ export type ToolCallInfo = {
   arguments: string;
   status: "running" | "success" | "error" | "denied";
   summary?: string;
+};
+
+export type AgentInfo = {
+  key: string;
+  name: string;
+  purpose: string;
+  whenToUse: string;
+};
+
+export type AgentActivity = {
+  agentKey: string;
+  agentName: string;
+  status: "running" | "done";
+  summary: string;
 };
 
 export type Paper = {
@@ -57,7 +73,7 @@ export type ChatMission = {
   id: number;
   sessionId: string;
   status: "queued" | "running" | "done" | "failed";
-  mode: "paper" | "ace";
+  mode: "paper" | "ace" | "paper_ace";
   message: string;
   paperId?: number;
   errorMessage?: string;
@@ -69,7 +85,7 @@ export type ChatMission = {
 
 export type ChatSession = {
   id: string;
-  scope: "paper" | "ace";
+  scope: "paper" | "ace" | "paper_ace";
   paperId?: number;
   title: string;
   preview?: string;
@@ -269,7 +285,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ selection, context })
     }),
-  createSession: (scope: "paper" | "ace", paperId?: number, title = "") =>
+  agents: () => request<{ items: AgentInfo[] }>("/api/chat/agents"),
+  createSession: (scope: "paper" | "ace" | "paper_ace", paperId?: number, title = "") =>
     request<{ id: string }>("/api/chat/sessions", {
       method: "POST",
       body: JSON.stringify({ scope, paperId, title })
@@ -282,7 +299,7 @@ export const api = {
   listMessages: (sessionId: string) => request<{ items: ChatMessage[] }>(`/api/chat/sessions/${sessionId}/messages`),
   submitMission: (
     sessionId: string,
-    payload: { message: string; paperId?: number; selection?: string; attachmentPaperIds?: number[]; mode: "paper" | "ace" }
+    payload: { message: string; paperId?: number; selection?: string; attachmentPaperIds?: number[]; mode: "paper" | "ace" | "paper_ace" }
   ) =>
     request<ChatMission>(`/api/chat/sessions/${sessionId}/submit`, {
       method: "POST",
@@ -291,7 +308,7 @@ export const api = {
   getMission: (id: number) => request<ChatMission>(`/api/missions/${id}`),
   streamMessage: async (
     sessionId: string,
-    payload: { message: string; paperId?: number; selection?: string; attachmentPaperIds?: number[]; mode: "paper" | "ace" },
+    payload: { message: string; paperId?: number; selection?: string; attachmentPaperIds?: number[]; mode: "paper" | "ace" | "paper_ace" },
     onEvent: (event: StreamEvent) => void
   ) => {
     const response = await fetch(`${API_BASE_URL}/api/chat/sessions/${sessionId}/stream`, {
