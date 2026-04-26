@@ -88,7 +88,25 @@ def select_agents(message: str, has_long_history: bool = False) -> list[AgentSpe
     selected: list[AgentSpec] = [PAPER_ACE_AGENTS[0]]
     if has_long_history or any(token in lowered for token in ("summary", "summarize", "总结", "概括", "简短")):
         selected.append(PAPER_ACE_AGENTS[1])
-    if any(token in lowered for token in ("idea", "innovation", "novel", "future", "gap", "inspiration", "创新", "灵感", "方向", "不足")):
+    if any(
+        token in lowered
+        for token in (
+            "idea",
+            "inspire",
+            "inspiration",
+            "innovation",
+            "novel",
+            "future",
+            "gap",
+            "method inspire",
+            "research on",
+            "创新",
+            "启发",
+            "灵感",
+            "方向",
+            "不足",
+        )
+    ):
         selected.append(PAPER_ACE_AGENTS[2])
     if any(token in lowered for token in ("recommend", "suggest", "next", "reading", "推荐", "建议", "下一篇", "偏好")):
         selected.append(PAPER_ACE_AGENTS[3])
