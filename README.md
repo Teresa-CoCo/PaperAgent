@@ -34,6 +34,26 @@ paper-agent/
 
 ## 本地开发
 
+### 一键启动
+
+```bash
+cd paper-agent
+./start.sh
+```
+
+该脚本会使用 `server/.venv/bin/python` 启动后端，并同时启动 Vite 前端。默认地址：
+
+```text
+前端：http://localhost:5173
+后端：http://localhost:8000
+```
+
+可通过环境变量覆盖端口或 host：
+
+```bash
+SERVER_PORT=8001 CLIENT_PORT=5174 ./start.sh
+```
+
 ### 1. 后端
 ```bash
 cd paper-agent
