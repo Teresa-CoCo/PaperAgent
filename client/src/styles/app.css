@@ -1268,6 +1268,80 @@ input:focus, textarea:focus, select:focus {
   background: #22c55e;
 }
 
+.thinking-panel {
+  flex-shrink: 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+  overflow: hidden;
+}
+
+.thinking-toggle {
+  width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 9px;
+  text-align: left;
+  color: var(--ink);
+}
+
+.thinking-toggle span:first-child {
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.thinking-toggle small {
+  color: var(--ink-tertiary);
+  font-size: 0.72rem;
+}
+
+.thinking-chevron {
+  width: 18px;
+  text-align: center;
+  color: var(--ink-secondary);
+}
+
+.thinking-stream {
+  max-height: 170px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 9px 9px;
+}
+
+.thinking-item {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.thinking-item span {
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinking-item p {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.thinking-item.pending p {
+  color: var(--ink-tertiary);
+}
+
 .message-list {
   flex: 1;
   overflow-y: auto;

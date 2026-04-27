@@ -1,7 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Panel } from "./Panel";
 import { MarkdownText } from "./MarkdownText";
-import type { AgentActivity, AgentInfo, ChatMessage, Paper, ToolCallInfo } from "../lib/api";
+import type { AgentActivity, AgentInfo, ChatMessage, Paper, ThinkingItem, ToolCallInfo } from "../lib/api";
 
 type Props = {
   collapsed: boolean;
@@ -9,6 +9,7 @@ type Props = {
   messages: ChatMessage[];
   agents: AgentInfo[];
   agentActivities: AgentActivity[];
+  thinkingItems: ThinkingItem[];
   toolCalls: ToolCallInfo[];
   input: string;
   selection: string;
@@ -89,6 +90,31 @@ function AgentDock({ agents, activities }: { agents: AgentInfo[]; activities: Ag
   );
 }
 
+function ThinkingPanel({ items, loading }: { items: ThinkingItem[]; loading: boolean }) {
+  const [open, setOpen] = useState(true);
+  if (!items.length && !loading) return null;
+  return (
+    <div className="thinking-panel">
+      <button type="button" className="thinking-toggle" onClick={() => setOpen((value) => !value)}>
+        <span>Thinking</span>
+        <small>{items.length ? `${items.length} steps` : "starting"}</small>
+        <span className="thinking-chevron">{open ? "−" : "+"}</span>
+      </button>
+      {open && (
+        <div className="thinking-stream">
+          {items.map((item) => (
+            <div key={item.id} className="thinking-item">
+              <span>{item.agentName.replace(" Agent", "")}</span>
+              <p>{item.content}</p>
+            </div>
+          ))}
+          {loading && <div className="thinking-item pending"><span>Live</span><p>Waiting for the next agent update...</p></div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ApprovalDialog({ toolCall, onApprove, onDeny }: {
   toolCall: ToolCallInfo;
   onApprove: () => void;
@@ -115,6 +141,7 @@ export function ChatPanel({
   messages,
   agents,
   agentActivities,
+  thinkingItems,
   toolCalls,
   input,
   selection,
@@ -138,7 +165,7 @@ export function ChatPanel({
     const node = messageListRef.current;
     if (!node) return;
     node.scrollTop = node.scrollHeight;
-  }, [messages, toolCalls, agentActivities, loading]);
+  }, [messages, toolCalls, agentActivities, thinkingItems, loading]);
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -180,6 +207,7 @@ export function ChatPanel({
           </div>
 
           <AgentDock agents={agents} activities={agentActivities} />
+          <ThinkingPanel items={thinkingItems} loading={loading} />
 
           <div className="message-list" ref={messageListRef}>
             {messages.length === 0 && <p className="muted">对论文、选区、研究方向或最新论文提问；系统会显示正在使用的 Agent 和工具。</p>}

@@ -3,6 +3,7 @@ const USER_ID = import.meta.env.VITE_USER_ID || "local-user";
 
 export type StreamEvent =
   | { type: "text"; content: string }
+  | { type: "thinking"; agentKey: string; agentName: string; content: string }
   | { type: "agent_start"; agentKey: string; agentName: string; summary: string }
   | { type: "agent_result"; agentKey: string; agentName: string; summary: string }
   | { type: "tool_start"; toolCallId: string; name: string; arguments: string }
@@ -31,6 +32,14 @@ export type AgentActivity = {
   agentName: string;
   status: "running" | "done";
   summary: string;
+};
+
+export type ThinkingItem = {
+  id: string;
+  agentKey: string;
+  agentName: string;
+  content: string;
+  createdAt: string;
 };
 
 export type Paper = {

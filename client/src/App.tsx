@@ -6,7 +6,7 @@ import { PaperList } from "./components/PaperList";
 import { PaperViewer } from "./components/PaperViewer";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar, type LibraryMode } from "./components/Sidebar";
-import { api, type AgentActivity, type AgentInfo, type ChatMessage, type ChatMission, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper, type StreamEvent, type ToolCallInfo } from "./lib/api";
+import { api, type AgentActivity, type AgentInfo, type ChatMessage, type ChatMission, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper, type StreamEvent, type ThinkingItem, type ToolCallInfo } from "./lib/api";
 
 type ViewMode = "summary" | "markdown" | "pdf";
 type ChatMode = "paper_ace";
@@ -54,6 +54,7 @@ export default function App() {
   const [toolCallsBySession, setToolCallsBySession] = useState<Record<string, ToolCallInfo[]>>({});
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [agentActivitiesBySession, setAgentActivitiesBySession] = useState<Record<string, AgentActivity[]>>({});
+  const [thinkingBySession, setThinkingBySession] = useState<Record<string, ThinkingItem[]>>({});
   const [sessionLoading, setSessionLoading] = useState<Record<string, boolean>>({});
   const [chatAttachments, setChatAttachments] = useState<Paper[]>([]);
   const [mentionResults, setMentionResults] = useState<Paper[]>([]);
@@ -303,6 +304,7 @@ export default function App() {
       setSessionId(session.id);
       setMessagesBySession((prev) => ({ ...prev, [session.id]: [] }));
       setToolCallsBySession((prev) => ({ ...prev, [session.id]: [] }));
+      setThinkingBySession((prev) => ({ ...prev, [session.id]: [] }));
       setAgentActivitiesBySession((prev) => ({ ...prev, [session.id]: [] }));
       setSessions((items) => [next, ...items]);
       setHistoryOpen(false);
@@ -330,6 +332,11 @@ export default function App() {
         delete next[session.id];
         return next;
       });
+      setThinkingBySession((prev) => {
+        const next = { ...prev };
+        delete next[session.id];
+        return next;
+      });
       setAgentActivitiesBySession((prev) => {
         const next = { ...prev };
         delete next[session.id];
@@ -343,6 +350,7 @@ export default function App() {
           setSessionId("");
           setMessagesBySession({});
           setToolCallsBySession({});
+          setThinkingBySession({});
           setAgentActivitiesBySession({});
         }
       }
@@ -643,6 +651,7 @@ export default function App() {
     }));
     setToolCallsBySession((prev) => ({ ...prev, [sid]: [] }));
     setAgentActivitiesBySession((prev) => ({ ...prev, [sid]: [] }));
+    setThinkingBySession((prev) => ({ ...prev, [sid]: [] }));
 
     // Run stream in background — don't await
     api.streamMessage(
@@ -683,6 +692,20 @@ export default function App() {
         setAgentActivitiesBySession((prev) => ({
           ...prev,
           [sid]: [...(prev[sid] || []).filter((item) => item.agentKey !== event.agentKey), activity]
+        }));
+        break;
+      }
+      case "thinking": {
+        const item: ThinkingItem = {
+          id: `${Date.now()}-${event.agentKey}-${Math.random().toString(16).slice(2)}`,
+          agentKey: event.agentKey,
+          agentName: event.agentName,
+          content: event.content,
+          createdAt: new Date().toISOString()
+        };
+        setThinkingBySession((prev) => ({
+          ...prev,
+          [sid]: [...(prev[sid] || []), item]
         }));
         break;
       }
@@ -900,6 +923,7 @@ export default function App() {
         messages={messagesBySession[sessionId] || []}
         agents={agents}
         agentActivities={agentActivitiesBySession[sessionId] || []}
+        thinkingItems={thinkingBySession[sessionId] || []}
         toolCalls={toolCallsBySession[sessionId] || []}
         input={input}
         selection={selection}
