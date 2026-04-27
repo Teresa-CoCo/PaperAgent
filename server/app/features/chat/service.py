@@ -1,12 +1,25 @@
 import json
 import asyncio
+import re
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import date
 
 from app.db.connection import transaction
 from app.core.errors import AppError
-from app.features.chat.agents import PAPER_ACE_AGENT_CHARTER, agent_catalog, select_agents
+from app.features.chat.agents import (
+    AGENTS_BY_KEY,
+    CLASSIFIER_SYSTEM_PROMPT,
+    PAPER_ACE_AGENT_CHARTER,
+    AgentSpec,
+    IntentClassification,
+    agent_catalog,
+    fallback_intent_classification,
+    parse_intent_classification,
+    select_agents,
+)
+from app.features.chat.memory import AgentMemoryStore
 from app.features.papers.arxiv_tool import ArxivTool
 from app.features.papers.service import PaperService
 from app.features.tools.brave_search import BraveSearchTool
@@ -28,6 +41,13 @@ _mission_queue_lock = asyncio.Lock()
 PAPER_ACE_SCOPE = "paper_ace"
 
 
+@dataclass
+class AgentRunResult:
+    agent: AgentSpec
+    content: str
+    tool_results: list[dict] = field(default_factory=list)
+
+
 class ChatService:
     def __init__(self) -> None:
         self.llm = LLMClient()
@@ -35,6 +55,7 @@ class ChatService:
         self.preferences = UserPreferenceService()
         self.search_tool = BraveSearchTool()
         self.arxiv_tool = ArxivTool()
+        self.agent_memory = AgentMemoryStore()
 
     def _tool_ctx(self, user_id: str) -> ToolContext:
         return ToolContext(
@@ -445,7 +466,8 @@ class ChatService:
         session_history: list[dict],
         attachment_paper_ids: list[int] | None = None,
     ) -> AsyncIterator[str]:
-        selected_agents = select_agents(message, has_long_history=len(session_history) >= 12)
+        classification = await self._classify_intent(message, has_long_history=len(session_history) >= 12)
+        selected_agents = select_agents(classification=classification)
         for agent in selected_agents:
             yield json.dumps(
                 {
@@ -456,147 +478,104 @@ class ChatService:
                 },
                 ensure_ascii=False,
             )
+        yield self._thinking_event(
+            "classifier",
+            "Intent classifier",
+            f"Intent: {classification.primary_intent}; agents: {', '.join(agent.key for agent in selected_agents)}. {classification.rationale}",
+        )
 
-        messages = self._paper_ace_initial_messages(
+        candidate_agents = [agent for agent in selected_agents if agent.key in {"research", "inspiration", "suggestion"}]
+        other_agents = [agent for agent in selected_agents if agent.key in {"summary", "tool_maker"}]
+        tasks = [
+            asyncio.create_task(
+                self._run_candidate_agent(
+                    agent,
+                    user_id,
+                    message,
+                    paper_id=paper_id,
+                    selection=selection,
+                    session_history=session_history,
+                    attachment_paper_ids=attachment_paper_ids,
+                    classification=classification,
+                )
+            )
+            for agent in candidate_agents
+        ]
+
+        for agent in other_agents:
+            tasks.append(
+                asyncio.create_task(
+                    self._run_candidate_agent(
+                        agent,
+                        user_id,
+                        message,
+                        paper_id=paper_id,
+                        selection=selection,
+                        session_history=session_history,
+                        attachment_paper_ids=attachment_paper_ids,
+                        classification=classification,
+                    )
+                )
+            )
+
+        results: list[AgentRunResult] = []
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            results.append(result)
+            for tool_result in result.tool_results:
+                yield json.dumps(
+                    {
+                        "type": "tool_start",
+                        "toolCallId": tool_result["id"],
+                        "name": tool_result["name"],
+                        "arguments": tool_result["arguments"],
+                    },
+                    ensure_ascii=False,
+                )
+                yield json.dumps(
+                    {
+                        "type": "tool_result",
+                        "toolCallId": tool_result["id"],
+                        "name": tool_result["name"],
+                        "summary": self._tool_result_summary(tool_result["name"], tool_result["result"]),
+                    },
+                    ensure_ascii=False,
+                )
+            yield self._thinking_event(result.agent.key, result.agent.name, result.content[:900])
+            yield json.dumps(
+                {
+                    "type": "agent_result",
+                    "agentKey": result.agent.key,
+                    "agentName": result.agent.name,
+                    "summary": "候选结果已生成，等待 Evaluation Agent 汇总。",
+                },
+                ensure_ascii=False,
+            )
+
+        evaluation_agent = AGENTS_BY_KEY["evaluation"]
+        yield self._thinking_event("evaluation", evaluation_agent.name, "Checking candidate outputs for cited claims and composing final answer.")
+        final_answer = await self._evaluate_agent_outputs(
             user_id,
             message,
             paper_id=paper_id,
             selection=selection,
             session_history=session_history,
             attachment_paper_ids=attachment_paper_ids,
-            selected_agent_keys=[agent.key for agent in selected_agents],
+            classification=classification,
+            results=results,
         )
-        tools = tool_definitions()
-        ctx = self._tool_ctx(user_id)
-
-        for turn in range(MAX_TOOL_TURNS):
-            response: LLMResponse = await self.llm.complete(
-                f"paper-ace-tool-loop-{turn}",
-                messages,
-                use_cache=False,
-                tools=tools,
-            )
-
-            if not response.tool_calls:
-                for agent in selected_agents:
-                    yield json.dumps(
-                        {
-                            "type": "agent_result",
-                            "agentKey": agent.key,
-                            "agentName": agent.name,
-                            "summary": "本轮工作完成，最终回答已按可用证据生成。",
-                        },
-                        ensure_ascii=False,
-                    )
-                for chunk in self._chunk_text(response.content):
-                    yield json.dumps({"type": "text", "content": chunk}, ensure_ascii=False)
-                yield json.dumps({"type": "done"})
-                return
-
-            messages.append(
-                ChatMessage(
-                    role="assistant",
-                    content=response.content or "",
-                    tool_calls=[
-                        {"id": t.id, "type": "function", "function": t.function}
-                        for t in response.tool_calls
-                    ],
-                )
-            )
-
-            for tc in response.tool_calls:
-                func_name = tc.function["name"]
-                func_args = tc.function["arguments"]
-
-                yield json.dumps(
-                    {
-                        "type": "tool_start",
-                        "toolCallId": tc.id,
-                        "name": func_name,
-                        "arguments": func_args,
-                    },
-                    ensure_ascii=False,
-                )
-
-                if func_name == "shell_execute":
-                    try:
-                        args = json.loads(func_args) if func_args else {}
-                        command = args.get("command", "")
-                    except (json.JSONDecodeError, TypeError):
-                        command = ""
-                    danger = is_dangerous_command(command)
-                    if danger:
-                        register_approval(tc.id, command)
-                        yield json.dumps(
-                            {
-                                "type": "approval",
-                                "toolCallId": tc.id,
-                                "command": command,
-                                "reason": danger,
-                            },
-                            ensure_ascii=False,
-                        )
-                        await await_approval(tc.id).wait()
-                        approved = approval_decision(tc.id)
-                        cleanup_approval(tc.id)
-                        if not approved:
-                            yield json.dumps(
-                                {
-                                    "type": "tool_result",
-                                    "toolCallId": tc.id,
-                                    "name": func_name,
-                                    "summary": "⚠️ Command execution denied by user",
-                                },
-                                ensure_ascii=False,
-                            )
-                            messages.append(
-                                ChatMessage(
-                                    role="tool",
-                                    content=json.dumps({"status": "denied", "command": command}, ensure_ascii=False),
-                                    tool_call_id=tc.id,
-                                )
-                            )
-                            continue
-
-                try:
-                    tool_result = await execute_tool(func_name, func_args, ctx)
-                    parsed_result = json.loads(tool_result)
-                except Exception as exc:
-                    parsed_result = {"error": f"Tool execution failed: {exc}"}
-
-                summary = self._tool_result_summary(func_name, parsed_result)
-                yield json.dumps(
-                    {
-                        "type": "tool_result",
-                        "toolCallId": tc.id,
-                        "name": func_name,
-                        "summary": summary,
-                    },
-                    ensure_ascii=False,
-                )
-
-                messages.append(
-                    ChatMessage(
-                        role="tool",
-                        content=json.dumps(parsed_result, ensure_ascii=False),
-                        tool_call_id=tc.id,
-                    )
-                )
-        else:
-            msg = "工具调用次数已达上限，基于已有信息回答，并标明未完成的核验风险。"
-            messages.append(ChatMessage("assistant", msg))
-
-        for agent in selected_agents:
-            yield json.dumps(
-                {
-                    "type": "agent_result",
-                    "agentKey": agent.key,
-                    "agentName": agent.name,
-                    "summary": "本轮工作完成，最终回答将标明未完成的核验风险。",
-                },
-                ensure_ascii=False,
-            )
-        async for chunk in self.llm.stream(messages):
+        output_by_agent = {result.agent.key: result.content for result in results}
+        self.agent_memory.update_from_turn(user_id, message, final_answer, output_by_agent)
+        yield json.dumps(
+            {
+                "type": "agent_result",
+                "agentKey": evaluation_agent.key,
+                "agentName": evaluation_agent.name,
+                "summary": "已完成引用约束检查并生成最终回答。",
+            },
+            ensure_ascii=False,
+        )
+        for chunk in self._chunk_text(final_answer):
             yield json.dumps({"type": "text", "content": chunk}, ensure_ascii=False)
         yield json.dumps({"type": "done"})
 
@@ -609,27 +588,111 @@ class ChatService:
         session_history: list[dict],
         attachment_paper_ids: list[int] | None = None,
     ) -> str:
-        messages = self._paper_ace_initial_messages(
+        classification = await self._classify_intent(message, has_long_history=len(session_history) >= 12)
+        selected_agents = select_agents(classification=classification)
+        tasks = [
+            self._run_candidate_agent(
+                agent,
+                user_id,
+                message,
+                paper_id=paper_id,
+                selection=selection,
+                session_history=session_history,
+                attachment_paper_ids=attachment_paper_ids,
+                classification=classification,
+            )
+            for agent in selected_agents
+            if agent.key != "evaluation"
+        ]
+        results = await asyncio.gather(*tasks) if tasks else []
+        final_answer = await self._evaluate_agent_outputs(
             user_id,
             message,
             paper_id=paper_id,
             selection=selection,
             session_history=session_history,
             attachment_paper_ids=attachment_paper_ids,
-            selected_agent_keys=[agent.key for agent in select_agents(message, has_long_history=len(session_history) >= 12)],
+            classification=classification,
+            results=list(results),
         )
-        tools = tool_definitions()
+        self.agent_memory.update_from_turn(user_id, message, final_answer, {result.agent.key: result.content for result in results})
+        return final_answer
+
+    async def _classify_intent(self, message: str, has_long_history: bool = False) -> IntentClassification:
+        if not self.llm.settings.llm_api_key:
+            return fallback_intent_classification(message, has_long_history=has_long_history)
+        response = await self.llm.complete(
+            "paper-ace-intent-classifier",
+            [
+                ChatMessage("system", CLASSIFIER_SYSTEM_PROMPT),
+                ChatMessage(
+                    "user",
+                    json.dumps(
+                        {
+                            "message": message,
+                            "has_long_history": has_long_history,
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            ],
+            use_cache=False,
+        )
+        return parse_intent_classification(response.content) or fallback_intent_classification(
+            message,
+            has_long_history=has_long_history,
+        )
+
+    async def _run_candidate_agent(
+        self,
+        agent: AgentSpec,
+        user_id: str,
+        message: str,
+        paper_id: int | None,
+        selection: str | None,
+        session_history: list[dict],
+        attachment_paper_ids: list[int] | None,
+        classification: IntentClassification,
+    ) -> AgentRunResult:
+        context_chunks = self.papers.retrieve_context(paper_id, message if message.strip() else selection or "") if paper_id else []
+        memories = self.agent_memory.get_many(user_id, [agent.key])
+        messages = [
+            ChatMessage("system", self._candidate_system_prompt(agent)),
+            ChatMessage(
+                "system",
+                (
+                    f"Runtime date: {date.today().isoformat()}.\n"
+                    f"Current user id: {user_id}.\n"
+                    f"Intent classification: {classification.primary_intent}; {', '.join(classification.intents)}.\n"
+                    f"Agent memory:\n{memories[agent.key].brief() if agent.key in memories else 'No dedicated memory.'}"
+                ),
+            ),
+            *self._history_to_chat_messages(session_history[:-1]),
+            ChatMessage(
+                "user",
+                self._paper_ace_user_prompt(
+                    message,
+                    paper_id=paper_id,
+                    selection=selection,
+                    context_chunks=context_chunks,
+                    attachment_paper_ids=attachment_paper_ids,
+                ),
+            ),
+        ]
+        tools = self._candidate_tool_definitions(agent)
+        tool_results: list[dict] = []
         ctx = self._tool_ctx(user_id)
 
-        for turn in range(MAX_TOOL_TURNS):
+        for turn in range(3):
             response = await self.llm.complete(
-                f"paper-ace-reply-tool-{turn}",
+                f"paper-ace-{agent.key}-{turn}",
                 messages,
                 use_cache=False,
                 tools=tools,
             )
             if not response.tool_calls:
-                return response.content
+                content = response.content or "No candidate output generated."
+                return AgentRunResult(agent=agent, content=content, tool_results=tool_results)
 
             messages.append(
                 ChatMessage(
@@ -642,9 +705,188 @@ class ChatService:
                 )
             )
             for tc in response.tool_calls:
-                tool_result = await execute_tool(tc.function["name"], tc.function["arguments"], ctx)
-                messages.append(ChatMessage(role="tool", content=tool_result, tool_call_id=tc.id))
-        return "工具调用次数已达上限，基于已有信息回答，并标明未完成的核验风险。"
+                try:
+                    raw_result = await execute_tool(tc.function["name"], tc.function["arguments"], ctx)
+                    parsed_result = json.loads(raw_result)
+                except Exception as exc:
+                    parsed_result = {"error": f"Tool execution failed: {exc}"}
+                tool_results.append(
+                    {
+                        "id": f"{agent.key}-{tc.id}",
+                        "name": tc.function["name"],
+                        "arguments": tc.function["arguments"],
+                        "result": parsed_result,
+                    }
+                )
+                messages.append(
+                    ChatMessage(
+                        role="tool",
+                        content=json.dumps(parsed_result, ensure_ascii=False),
+                        tool_call_id=tc.id,
+                    )
+                )
+
+        return AgentRunResult(
+            agent=agent,
+            content="Agent stopped after tool-call limit; use available tool results cautiously.",
+            tool_results=tool_results,
+        )
+
+    def _candidate_system_prompt(self, agent: AgentSpec) -> str:
+        shared = (
+            f"You are the {agent.name}. {agent.purpose}\n"
+            "Return a concise candidate answer for the Evaluation Agent, not the final user answer.\n"
+            "Every factual claim must include a source marker in square brackets, such as [paper_id=12], [arXiv:2401.12345], or [https://example.com].\n"
+            "If evidence is missing, write 'unsupported' instead of guessing."
+        )
+        if agent.key == "research":
+            return shared + "\nUse database/RAG/arXiv/web tools when needed. Prefer source-backed findings over broad advice."
+        if agent.key == "suggestion":
+            return shared + "\nUse memory about recommendation feedback. Explain why recommendations match or conflict with past preferences."
+        if agent.key == "inspiration":
+            return shared + "\nGenerate creative but evidence-aware angles; separate facts from speculative ideas."
+        if agent.key == "summary":
+            return shared + "\nCompress prior context and candidate evidence into a short working summary."
+        if agent.key == "tool_maker":
+            return shared + "\nOnly suggest reusable tools when repetition or precision clearly justifies them."
+        return shared
+
+    def _candidate_tool_definitions(self, agent: AgentSpec) -> list[dict]:
+        names_by_agent = {
+            "research": {"search_database", "search_rag_database", "web_search", "arxiv_search"},
+            "suggestion": {"search_database", "list_favorite_folders"},
+            "inspiration": {"search_database", "search_rag_database", "arxiv_search"},
+            "summary": set(),
+            "tool_maker": set(),
+        }
+        names = names_by_agent.get(agent.key, set())
+        return [tool for tool in tool_definitions() if tool["function"]["name"] in names]
+
+    async def _evaluate_agent_outputs(
+        self,
+        user_id: str,
+        message: str,
+        paper_id: int | None,
+        selection: str | None,
+        session_history: list[dict],
+        attachment_paper_ids: list[int] | None,
+        classification: IntentClassification,
+        results: list[AgentRunResult],
+    ) -> str:
+        context_chunks = self.papers.retrieve_context(paper_id, message if message.strip() else selection or "") if paper_id else []
+        source_refs = self._available_source_refs(paper_id, attachment_paper_ids, context_chunks, results)
+        candidate_block = "\n\n".join(
+            f"## {result.agent.name}\n{result.content}\nTool refs: {', '.join(self._refs_from_tool_results(result.tool_results)) or 'none'}"
+            for result in results
+        ) or "No candidate agents produced output."
+        messages = [
+            ChatMessage("system", PAPER_ACE_AGENT_CHARTER),
+            ChatMessage(
+                "system",
+                (
+                    "You are the Evaluation Agent. Produce the final answer for the user.\n"
+                    "Hard citation rule: every key factual claim must include an explicit bracketed source reference from the available refs.\n"
+                    "Reject, flag, or downgrade claims that lack a matching tool result, paper ID, arXiv ID, or URL.\n"
+                    "Speculative ideas may be labeled as hypotheses, but supporting factual premises still need refs.\n"
+                    f"Available source refs: {', '.join(source_refs) or 'none'}.\n"
+                    f"Runtime date: {date.today().isoformat()}.\n"
+                    f"Intent classification: {classification.primary_intent}; {', '.join(classification.intents)}."
+                ),
+            ),
+            *self._history_to_chat_messages(session_history[:-1]),
+            ChatMessage(
+                "user",
+                (
+                    f"User request: {message}\n"
+                    f"Selection: {selection[:1200] if selection else 'none'}\n"
+                    f"Candidate outputs:\n{candidate_block}\n\n"
+                    "Write the final answer in the user's language. Include a short '引用检查' note if any important candidate claim was unsupported."
+                )[:20000],
+            ),
+        ]
+        response = await self.llm.complete("paper-ace-evaluation", messages, use_cache=False)
+        final_answer = response.content
+        citation_report = self._citation_report(final_answer, source_refs)
+        if citation_report:
+            final_answer = f"{final_answer.rstrip()}\n\n引用检查：{citation_report}"
+        return final_answer
+
+    def _available_source_refs(
+        self,
+        paper_id: int | None,
+        attachment_paper_ids: list[int] | None,
+        context_chunks: list[str],
+        results: list[AgentRunResult],
+    ) -> list[str]:
+        refs: list[str] = []
+        if paper_id:
+            refs.append(f"paper_id={paper_id}")
+        for attached_id in attachment_paper_ids or []:
+            refs.append(f"paper_id={attached_id}")
+        text = "\n".join(context_chunks + [result.content for result in results])
+        refs.extend(f"arXiv:{match}" for match in re.findall(r"arXiv:\s*([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", text, flags=re.I))
+        refs.extend(re.findall(r"https?://[^\s)\]]+", text))
+        for result in results:
+            refs.extend(self._refs_from_tool_results(result.tool_results))
+        return sorted(set(refs))
+
+    def _refs_from_tool_results(self, tool_results: list[dict]) -> list[str]:
+        refs: list[str] = []
+        for item in tool_results:
+            result = item.get("result", {})
+            if "paper_id" in result:
+                refs.append(f"paper_id={result['paper_id']}")
+            for paper in result.get("results", []) if isinstance(result.get("results"), list) else []:
+                if paper.get("id"):
+                    refs.append(f"paper_id={paper['id']}")
+                if paper.get("arxivId"):
+                    refs.append(f"arXiv:{paper['arxivId']}")
+                if paper.get("absUrl"):
+                    refs.append(paper["absUrl"])
+                if paper.get("url"):
+                    refs.append(paper["url"])
+            for paper in result.get("folders", []) if isinstance(result.get("folders"), list) else []:
+                if paper.get("id"):
+                    refs.append(f"favorite_folder={paper['id']}")
+        return refs
+
+    def _citation_report(self, answer: str, source_refs: list[str]) -> str:
+        factual_lines = [
+            line.strip()
+            for line in answer.splitlines()
+            if len(line.strip()) > 30 and not line.lstrip().startswith(("引用检查", "References", "来源"))
+        ]
+        if not factual_lines:
+            return ""
+        unsupported = [line for line in factual_lines if not self._line_has_known_ref(line, source_refs)]
+        if not unsupported:
+            return ""
+        sample = "；".join(line[:90] for line in unsupported[:3])
+        return f"发现 {len(unsupported)} 条可能缺少显式来源绑定的陈述，已保留但需要人工核验：{sample}"
+
+    def _line_has_known_ref(self, line: str, source_refs: list[str]) -> bool:
+        markers = re.findall(r"\[([^\]]+)\]", line)
+        if not markers:
+            return False
+        if not source_refs:
+            return False
+        normalized_refs = {ref.lower() for ref in source_refs}
+        for marker in markers:
+            normalized_marker = marker.lower()
+            if any(ref in normalized_marker or normalized_marker in ref for ref in normalized_refs):
+                return True
+        return False
+
+    def _thinking_event(self, agent_key: str, agent_name: str, content: str) -> str:
+        return json.dumps(
+            {
+                "type": "thinking",
+                "agentKey": agent_key,
+                "agentName": agent_name,
+                "content": content,
+            },
+            ensure_ascii=False,
+        )
 
     def _paper_ace_initial_messages(
         self,
