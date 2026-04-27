@@ -455,9 +455,84 @@ class PaperService:
         return int(row["max_results"]) if row else 20
 
     async def fetch_papers_for_date(self, category: str, target_date: date | None, max_results: int = 20) -> list[dict]:
+        if target_date:
+            try:
+                enhanced = await self.fetch_enhanced_papers_for_date(category, target_date, max_results)
+                if enhanced:
+                    return enhanced
+            except httpx.HTTPError:
+                pass
         if target_date is None or target_date == date.today():
             return await self.arxiv.query_announced_new(category, max_results=max_results, announced_date=target_date or date.today())
         return await self.arxiv.query(category, max_results, target_date, target_date)
+
+    async def fetch_enhanced_papers_for_date(self, category: str, target_date: date, max_results: int = 20) -> list[dict]:
+        url = self.settings.daily_arxiv_enhanced_url_template.format(date=target_date.isoformat())
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(url, headers={"User-Agent": "PaperAgent/0.1"})
+            response.raise_for_status()
+
+        papers: list[dict] = []
+        for line in response.text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            paper = self._paper_from_enhanced_item(item, category, target_date)
+            if not paper:
+                continue
+            papers.append(paper)
+            if len(papers) >= max_results:
+                break
+        return papers
+
+    def _paper_from_enhanced_item(self, item: dict, requested_category: str, target_date: date) -> dict | None:
+        arxiv_id = str(item.get("id") or "").strip()
+        if not arxiv_id:
+            return None
+        categories = [str(value) for value in item.get("categories") or [] if value]
+        if requested_category != ALL_CATEGORIES and requested_category not in categories:
+            return None
+        version = 1
+        ai = item.get("AI") if isinstance(item.get("AI"), dict) else {}
+        ai_summary = self._enhanced_ai_summary(ai)
+        category = requested_category if requested_category != ALL_CATEGORIES and requested_category in categories else categories[0] if categories else requested_category
+        return {
+            "arxiv_id": arxiv_id,
+            "version": version,
+            "title": str(item.get("title") or ""),
+            "abstract": str(item.get("summary") or ""),
+            "authors": [str(author) for author in item.get("authors") or [] if author],
+            "category": category,
+            "tags": categories,
+            "pdf_url": str(item.get("pdf") or f"https://arxiv.org/pdf/{arxiv_id}"),
+            "abs_url": str(item.get("abs") or f"https://arxiv.org/abs/{arxiv_id}"),
+            "published_at": target_date.isoformat(),
+            "updated_at": target_date.isoformat(),
+            "ai_summary": ai_summary,
+            "raw_metadata": {
+                "source": "daily_arxiv_ai_enhanced",
+                "categories": categories,
+                "comment": item.get("comment"),
+                "code_url": item.get("code_url"),
+                "ai": ai,
+            },
+        }
+
+    def _enhanced_ai_summary(self, ai: dict) -> str:
+        if not ai:
+            return ""
+        sections = [
+            ("TL;DR", ai.get("tldr")),
+            ("动机", ai.get("motivation")),
+            ("方法", ai.get("method")),
+            ("结果", ai.get("result")),
+            ("结论", ai.get("conclusion")),
+        ]
+        return "\n\n".join(f"**{label}**：{value}" for label, value in sections if value)
 
     def _mark_step_done(self, job_id: int, step_id: int, result: dict) -> None:
         with transaction() as connection:

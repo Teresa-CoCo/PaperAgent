@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { startTransition, useCallback, useState } from "react";
 import { API_BASE_URL, type Paper } from "../lib/api";
 import { Panel } from "./Panel";
 import { MarkdownText } from "./MarkdownText";
@@ -36,6 +36,17 @@ export function PaperViewer({
 }: Props) {
   const [markdownMode, setMarkdownMode] = useState<"preview" | "source">("preview");
 
+  const resolveMarkdownAsset = useCallback((src?: string) => {
+    if (!src) return "";
+    if (/^(https?:|data:|blob:|#|\/)/i.test(src)) return src;
+    if (!paper?.assetBasePath) return src;
+    return `${API_BASE_URL}${paper.assetBasePath}/${src.replace(/^\.\//, "")}`;
+  }, [paper?.assetBasePath]);
+
+  const selectViewMode = (mode: "summary" | "markdown" | "pdf") => {
+    startTransition(() => onViewMode(mode));
+  };
+
   if (!paper) {
     return (
       <Panel className="viewer empty-viewer">
@@ -51,13 +62,6 @@ export function PaperViewer({
     onSelection(text);
   };
 
-  const resolveMarkdownAsset = (src?: string) => {
-    if (!src) return "";
-    if (/^(https?:|data:|blob:|#|\/)/i.test(src)) return src;
-    if (!paper.assetBasePath) return src;
-    return `${API_BASE_URL}${paper.assetBasePath}/${src.replace(/^\.\//, "")}`;
-  };
-
   return (
     <Panel className="viewer">
       <header className="viewer-header">
@@ -68,7 +72,7 @@ export function PaperViewer({
         </div>
         <div className="mode-tabs" role="tablist" aria-label="论文视图切换">
           {(["summary", "markdown", "pdf"] as const).map((mode) => (
-            <button key={mode} className={viewMode === mode ? "active" : ""} onClick={() => onViewMode(mode)}>
+            <button key={mode} className={viewMode === mode ? "active" : ""} onClick={() => selectViewMode(mode)}>
               {mode === "summary" ? "总结" : mode === "markdown" ? "Markdown" : "PDF"}
             </button>
           ))}

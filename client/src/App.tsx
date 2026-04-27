@@ -60,6 +60,8 @@ export default function App() {
   const [mentionResults, setMentionResults] = useState<Paper[]>([]);
   const [mentionOpen, setMentionOpen] = useState(false);
   const streamingSessionsRef = useRef<Set<string>>(new Set());
+  const streamTextBuffersRef = useRef<Record<string, string>>({});
+  const streamTextTimersRef = useRef<Record<string, number>>({});
   const [actionLoading, setActionLoading] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
@@ -109,7 +111,7 @@ export default function App() {
   useEffect(() => {
     const mentionQuery = extractMentionQuery(input);
     if (mentionQuery === null) {
-      setMentionResults([]);
+      setMentionResults((items) => items.length ? [] : items);
       setMentionOpen(false);
       return;
     }
@@ -623,6 +625,9 @@ export default function App() {
   function sendMessageInner(sid: string, content: string, attachmentPaperIds: number[]) {
     if (streamingSessionsRef.current.has(sid)) return; // Already streaming
     streamingSessionsRef.current.add(sid);
+    streamTextBuffersRef.current[sid] = "";
+    window.clearTimeout(streamTextTimersRef.current[sid]);
+    delete streamTextTimersRef.current[sid];
     setSessionLoading((prev) => ({ ...prev, [sid]: true }));
     setError("");
     setInput("");
@@ -662,25 +667,17 @@ export default function App() {
       }
     )
       .then(async () => {
-        await onStreamDone(sid);
+        await onStreamDone(sid, assistantMessage.id);
       })
       .catch((reason: Error) => {
-        handleStreamError(sid, reason);
+        handleStreamError(sid, assistantMessage.id, reason);
       });
   }
 
   function handleStreamEvent(sid: string, assistantId: number, pendingToolCalls: ToolCallInfo[], event: StreamEvent) {
     switch (event.type) {
       case "text":
-        setMessagesBySession((prev) => {
-          const msgs = prev[sid] || [];
-          return {
-            ...prev,
-            [sid]: msgs.map((m) =>
-              m.id === assistantId ? { ...m, content: m.content + event.content } : m
-            )
-          };
-        });
+        queueStreamText(sid, assistantId, event.content);
         break;
       case "agent_start": {
         const activity: AgentActivity = {
@@ -757,6 +754,7 @@ export default function App() {
         break;
       }
       case "error":
+        flushStreamText(sid, assistantId);
         setMessagesBySession((prev) => {
           const msgs = prev[sid] || [];
           return {
@@ -774,8 +772,35 @@ export default function App() {
     }
   }
 
-  async function onStreamDone(sid: string) {
+  function queueStreamText(sid: string, assistantId: number, content: string) {
+    streamTextBuffersRef.current[sid] = (streamTextBuffersRef.current[sid] || "") + content;
+    if (streamTextTimersRef.current[sid]) return;
+    streamTextTimersRef.current[sid] = window.setTimeout(() => {
+      flushStreamText(sid, assistantId);
+    }, 50);
+  }
+
+  function flushStreamText(sid: string, assistantId: number) {
+    window.clearTimeout(streamTextTimersRef.current[sid]);
+    delete streamTextTimersRef.current[sid];
+    const buffered = streamTextBuffersRef.current[sid];
+    if (!buffered) return;
+    streamTextBuffersRef.current[sid] = "";
+    setMessagesBySession((prev) => {
+      const msgs = prev[sid] || [];
+      return {
+        ...prev,
+        [sid]: msgs.map((m) =>
+          m.id === assistantId ? { ...m, content: m.content + buffered } : m
+        )
+      };
+    });
+  }
+
+  async function onStreamDone(sid: string, assistantId: number) {
+    flushStreamText(sid, assistantId);
     streamingSessionsRef.current.delete(sid);
+    delete streamTextBuffersRef.current[sid];
     setSessionLoading((prev) => ({ ...prev, [sid]: false }));
     const [messageData, sessionData] = await Promise.all([
       api.listMessages(sid),
@@ -786,8 +811,12 @@ export default function App() {
     setSessions(sessionData.items);
   }
 
-  function handleStreamError(sid: string, reason: Error) {
+  function handleStreamError(sid: string, assistantId: number, reason: Error) {
+    flushStreamText(sid, assistantId);
     streamingSessionsRef.current.delete(sid);
+    window.clearTimeout(streamTextTimersRef.current[sid]);
+    delete streamTextTimersRef.current[sid];
+    delete streamTextBuffersRef.current[sid];
     setSessionLoading((prev) => ({ ...prev, [sid]: false }));
     setError(reason.message);
   }

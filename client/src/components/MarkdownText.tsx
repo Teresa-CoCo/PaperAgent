@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -12,6 +12,15 @@ type Props = {
   allowRawHtml?: boolean;
   compact?: boolean;
   resolveImage?: (src?: string) => string;
+};
+
+const REMARK_PLUGINS = [remarkGfm, remarkMath];
+const REHYPE_PLUGINS = [rehypeKatex];
+const REHYPE_RAW_PLUGINS = [rehypeRaw, rehypeKatex];
+const COMPACT_COMPONENTS: Components = {
+  p: ({ children: content }: { children?: ReactNode }) => <span>{content}</span>,
+  strong: ({ children: content }: { children?: ReactNode }) => <strong>{content}</strong>,
+  em: ({ children: content }: { children?: ReactNode }) => <em>{content}</em>
 };
 
 function replaceLatexCommand(value: string, command: string, marker: "*" | "**") {
@@ -50,34 +59,31 @@ export function normalizeLatexMarkdown(value = "") {
   });
 }
 
-export function MarkdownText({
+export const MarkdownText = memo(function MarkdownText({
   children = "",
   className,
   allowRawHtml = false,
   compact = false,
   resolveImage
 }: Props) {
-  const components: Components = compact
-    ? {
-        p: ({ children: content }: { children?: ReactNode }) => <span>{content}</span>,
-        strong: ({ children: content }: { children?: ReactNode }) => <strong>{content}</strong>,
-        em: ({ children: content }: { children?: ReactNode }) => <em>{content}</em>
-      }
+  const normalized = useMemo(() => normalizeLatexMarkdown(children), [children]);
+  const components: Components = useMemo(() => compact
+    ? COMPACT_COMPONENTS
     : {
         img: ({ src, alt }: { src?: string; alt?: string }) => (
           <img src={resolveImage ? resolveImage(src) : src} alt={alt || ""} loading="lazy" />
         )
-      };
+      }, [compact, resolveImage]);
 
   return (
     <div className={className}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={allowRawHtml ? [rehypeRaw, rehypeKatex] : [rehypeKatex]}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={allowRawHtml ? REHYPE_RAW_PLUGINS : REHYPE_PLUGINS}
         components={components}
       >
-        {normalizeLatexMarkdown(children)}
+        {normalized}
       </ReactMarkdown>
     </div>
   );
-}
+});

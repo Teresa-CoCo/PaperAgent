@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     paddleocr_chunk_pages: int = 10
 
     default_arxiv_categories: str = "cs.AI,cs.CL,cs.CV,cs.GR,cs.LG,stat.ML"
+    daily_arxiv_enhanced_url_template: str = (
+        "https://raw.githubusercontent.com/dw-dengwei/daily-arXiv-ai-enhanced/"
+        "data/data/{date}_AI_enhanced_Chinese.jsonl"
+    )
     crawl_interval_minutes: int = 720
     daily_paper_default_max_results: int = 12
     daily_paper_summary_chars: int = 18_000

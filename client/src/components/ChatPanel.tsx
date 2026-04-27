@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Panel } from "./Panel";
 import { MarkdownText } from "./MarkdownText";
 import type { AgentActivity, AgentInfo, ChatMessage, Paper, ThinkingItem, ToolCallInfo } from "../lib/api";
@@ -27,7 +27,7 @@ type Props = {
   onRemoveAttachment: (paperId: number) => void;
 };
 
-function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
+const ToolCallCard = memo(function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
   let statusLabel = "";
   let statusClass = "";
   switch (toolCall.status) {
@@ -70,10 +70,10 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
       {toolCall.summary && <div className="tool-call-summary">{toolCall.summary}</div>}
     </div>
   );
-}
+});
 
-function AgentDock({ agents, activities }: { agents: AgentInfo[]; activities: AgentActivity[] }) {
-  const activityByKey = new Map(activities.map((activity) => [activity.agentKey, activity]));
+const AgentDock = memo(function AgentDock({ agents, activities }: { agents: AgentInfo[]; activities: AgentActivity[] }) {
+  const activityByKey = useMemo(() => new Map(activities.map((activity) => [activity.agentKey, activity])), [activities]);
   return (
     <div className="agent-dock" aria-label="Paper Ace Paper agents">
       {agents.map((agent) => {
@@ -88,9 +88,9 @@ function AgentDock({ agents, activities }: { agents: AgentInfo[]; activities: Ag
       })}
     </div>
   );
-}
+});
 
-function ThinkingPanel({ items, loading }: { items: ThinkingItem[]; loading: boolean }) {
+const ThinkingPanel = memo(function ThinkingPanel({ items, loading }: { items: ThinkingItem[]; loading: boolean }) {
   const [open, setOpen] = useState(true);
   if (!items.length && !loading) return null;
   return (
@@ -113,7 +113,7 @@ function ThinkingPanel({ items, loading }: { items: ThinkingItem[]; loading: boo
       )}
     </div>
   );
-}
+});
 
 function ApprovalDialog({ toolCall, onApprove, onDeny }: {
   toolCall: ToolCallInfo;
@@ -134,6 +134,50 @@ function ApprovalDialog({ toolCall, onApprove, onDeny }: {
     </div>
   );
 }
+
+const MessageList = memo(function MessageList({
+  messages,
+  toolCalls,
+  loading
+}: {
+  messages: ChatMessage[];
+  toolCalls: ToolCallInfo[];
+  loading: boolean;
+}) {
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const node = messageListRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [messages, toolCalls, loading]);
+
+  return (
+    <div className="message-list" ref={messageListRef}>
+      {messages.length === 0 && <p className="muted">对论文、选区、研究方向或最新论文提问；系统会显示正在使用的 Agent 和工具。</p>}
+      {messages.map((message, index) => (
+        <div key={message.id}>
+          <div className={`message ${message.role}`}>
+            <span>{message.role === "user" ? "你" : "Agent"}</span>
+            <MarkdownText className="markdown-text message-markdown">
+              {message.content}
+            </MarkdownText>
+          </div>
+          {message.role === "assistant" && index === messages.length - 1 && toolCalls.length > 0 && (
+            <div className="tool-calls-group">
+              {toolCalls.map((tc) => (
+                <ToolCallCard key={tc.toolCallId} toolCall={tc} />
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      {loading && !toolCalls.length && (
+        <div className="message assistant"><span>Agent</span><p>生成中...</p></div>
+      )}
+    </div>
+  );
+});
 
 export function ChatPanel({
   collapsed,
@@ -158,14 +202,7 @@ export function ChatPanel({
   onAttachPaper,
   onRemoveAttachment
 }: Props) {
-  const pendingApproval = toolCalls.find((tc) => tc.summary?.startsWith("⚠️ 需要批准"));
-  const messageListRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const node = messageListRef.current;
-    if (!node) return;
-    node.scrollTop = node.scrollHeight;
-  }, [messages, toolCalls, agentActivities, thinkingItems, loading]);
+  const pendingApproval = useMemo(() => toolCalls.find((tc) => tc.summary?.startsWith("⚠️ 需要批准")), [toolCalls]);
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -209,30 +246,7 @@ export function ChatPanel({
           <AgentDock agents={agents} activities={agentActivities} />
           <ThinkingPanel items={thinkingItems} loading={loading} />
 
-          <div className="message-list" ref={messageListRef}>
-            {messages.length === 0 && <p className="muted">对论文、选区、研究方向或最新论文提问；系统会显示正在使用的 Agent 和工具。</p>}
-            {messages.map((message, index) => (
-              <div key={message.id}>
-                <div className={`message ${message.role}`}>
-                  <span>{message.role === "user" ? "你" : "Agent"}</span>
-                  <MarkdownText className="markdown-text message-markdown">
-                    {message.content}
-                  </MarkdownText>
-                </div>
-                {/* Show tool calls after the last assistant message */}
-                {message.role === "assistant" && index === messages.length - 1 && toolCalls.length > 0 && (
-                  <div className="tool-calls-group">
-                    {toolCalls.map((tc) => (
-                      <ToolCallCard key={tc.toolCallId} toolCall={tc} />
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-            {loading && !toolCalls.length && (
-              <div className="message assistant"><span>Agent</span><p>生成中...</p></div>
-            )}
-          </div>
+          <MessageList messages={messages} toolCalls={toolCalls} loading={loading} />
 
           {selection && <div className="selected-snippet">{selection.slice(0, 180)}</div>}
 
