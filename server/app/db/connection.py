@@ -39,6 +39,18 @@ def init_db() -> None:
         ensure_column(connection, "crawl_job_steps", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "crawl_job_steps", "next_run_at", "TEXT")
         ensure_column(connection, "chat_missions", "updated_at", "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_memories (
+              user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              agent_key TEXT NOT NULL,
+              memory_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY(user_id, agent_key)
+            )
+            """
+        )
 
 
 def ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
