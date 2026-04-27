@@ -48,11 +48,31 @@ export function Sidebar({
   onCrawl
 }: Props) {
   const quotaRatio = quota ? Math.min(100, Math.round((quota.pagesUsed / quota.dailyLimit) * 100)) : 0;
+  const parseBackendUtcTime = (value: string) => {
+    const normalized = /[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value}Z`;
+    return new Date(normalized);
+  };
   const formatRetryTime = (value?: string) => {
     if (!value) return "";
-    const date = new Date(value);
+    const date = parseBackendUtcTime(value);
     if (Number.isNaN(date.getTime())) return value.replace("T", " ").slice(0, 16);
     return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  };
+  const formatCrawlError = (value?: string) => {
+    if (!value) return "";
+    return value.replace(
+      /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/g,
+      (match) => {
+        const date = parseBackendUtcTime(match);
+        if (Number.isNaN(date.getTime())) return match;
+        return date.toLocaleString("zh-CN", {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit"
+        });
+      }
+    );
   };
 
   return (
@@ -100,7 +120,7 @@ export function Sidebar({
                         等待重试 {formatRetryTime(job.steps.find((step) => step.nextRunAt)?.nextRunAt)}
                       </p>
                     )}
-                    {job.errorMessage && <p className="crawl-error">{job.errorMessage}</p>}
+                    {job.errorMessage && <p className="crawl-error">{formatCrawlError(job.errorMessage)}</p>}
                   </div>
                 );
               })}
