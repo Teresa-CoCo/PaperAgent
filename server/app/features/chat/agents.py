@@ -2,6 +2,8 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from app.features.chat.prompts import get_prompt_store
+
 
 @dataclass(frozen=True)
 class AgentSpec:
@@ -9,6 +11,11 @@ class AgentSpec:
     name: str
     purpose: str
     when_to_use: str
+    phase: str = "candidate"
+    priority: int = 100
+    parallel_group: str = "default"
+    tools: tuple[str, ...] = field(default_factory=tuple)
+    prompt_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -20,66 +27,124 @@ class IntentClassification:
     rationale: str = ""
 
 
-PAPER_ACE_AGENTS: tuple[AgentSpec, ...] = (
-    AgentSpec(
-        key="research",
-        name="Research Agent",
-        purpose="Search local SQL papers, parsed RAG chunks, arXiv, and web sources for the user's research request.",
-        when_to_use="Use for paper lookup, factual questions, literature search, and any request needing external or database evidence.",
-    ),
-    AgentSpec(
-        key="summary",
-        name="Summary Agent",
-        purpose="Compress long chat history, tool results, and agent outputs into short working memory.",
-        when_to_use="Use when context is long, when multiple tool results need synthesis, or before the final response.",
-    ),
-    AgentSpec(
-        key="inspiration",
-        name="Inspiration Agent",
-        purpose="Identify innovation points, hidden assumptions, and promising research angles.",
-        when_to_use="Use when the user asks for ideas, novelty, future work, research gaps, or deeper directions.",
-    ),
-    AgentSpec(
-        key="suggestion",
-        name="Suggestion Agent",
-        purpose="Recommend papers and research directions aligned with the user's stated and inferred preferences.",
-        when_to_use="Use for recommendations, reading lists, next papers to study, or personalized direction finding.",
-    ),
-    AgentSpec(
-        key="tool_maker",
-        name="Tool Maker Agent",
-        purpose="Decide whether a lightweight reusable tool or skill would materially improve the task.",
-        when_to_use="Use sparingly. Prefer existing tools; only suggest or create tools when repetition or precision justifies it.",
-    ),
-    AgentSpec(
-        key="evaluation",
-        name="Evaluation Agent",
-        purpose="Verify claims, require references, and flag uncertainty or missing evidence.",
-        when_to_use="Use before final answers and whenever claims depend on tools, papers, or current facts.",
-    ),
+@dataclass(frozen=True)
+class ExecutionPlan:
+    parallel_batches: tuple[tuple[AgentSpec, ...], ...]
+    evaluation_agent: AgentSpec
+
+
+class BaseAgent:
+    key = ""
+    name = ""
+    purpose = ""
+    when_to_use = ""
+    phase = "candidate"
+    priority = 100
+    parallel_group = "default"
+    tools: tuple[str, ...] = tuple()
+    prompt_key = ""
+
+    def spec(self) -> AgentSpec:
+        return AgentSpec(
+            key=self.key,
+            name=self.name,
+            purpose=self.purpose,
+            when_to_use=self.when_to_use,
+            phase=self.phase,
+            priority=self.priority,
+            parallel_group=self.parallel_group,
+            tools=self.tools,
+            prompt_key=self.prompt_key,
+        )
+
+    def system_prompt(self) -> str:
+        store = get_prompt_store()
+        instruction = store.render(self.prompt_key) if self.prompt_key else ""
+        return store.render(
+            "candidate_base",
+            agent_name=self.name,
+            agent_purpose=self.purpose,
+            agent_instruction=instruction,
+        )
+
+
+_AGENT_REGISTRY: dict[str, BaseAgent] = {}
+
+
+def register_agent(*, key: str, tools: set[str] | tuple[str, ...], priority: int, phase: str = "candidate", parallel_group: str = "default"):
+    def decorator(cls: type[BaseAgent]) -> type[BaseAgent]:
+        instance = cls()
+        instance.key = key
+        instance.priority = priority
+        instance.phase = phase
+        instance.parallel_group = parallel_group
+        instance.tools = tuple(sorted(tools))
+        _AGENT_REGISTRY[key] = instance
+        return cls
+
+    return decorator
+
+
+@register_agent(
+    key="research",
+    tools={"search_database", "search_rag_database", "web_search", "arxiv_search"},
+    priority=10,
+    parallel_group="exploration",
 )
+class ResearchAgent(BaseAgent):
+    name = "Research Agent"
+    purpose = "Search local SQL papers, parsed RAG chunks, arXiv, and web sources for the user's research request."
+    when_to_use = "Use for paper lookup, factual questions, literature search, and any request needing external or database evidence."
+    prompt_key = "agent_research"
 
 
-PAPER_ACE_AGENT_CHARTER = """You are Paper Ace Paper, a multi-agent research workspace.
+@register_agent(key="summary", tools=set(), priority=40, parallel_group="synthesis")
+class SummaryAgent(BaseAgent):
+    name = "Summary Agent"
+    purpose = "Compress long chat history, tool results, and agent outputs into short working memory."
+    when_to_use = "Use when context is long, when multiple tool results need synthesis, or before the final response."
+    prompt_key = "agent_summary"
 
-Stable agent team:
-1. Research Agent: search all available local RAG chunks and SQL paper metadata for the user's prompt; use web_search and arxiv_search when local evidence is insufficient or the user asks for recent/current work.
-2. Summary Agent: summarize chat history and agent/tool outputs into concise working memory when context is long or results need shortening.
-3. Inspiration Agent: inspect papers with curiosity, identify innovation points, research gaps, and directions the user may dive into.
-4. Suggestion Agent: use the user's preferences and prior context to recommend papers and research directions the user is likely to study.
-5. Tool Maker Agent: decide whether to make or adapt tools/skills when that is important; do not make tools by default.
-6. Evaluation Agent: check that every factual claim has a reference or clear uncertainty label; do not allow unsupported certainty.
 
-Operating rules:
-- This is one combined chat entry. Preserve both legacy paper-focused RAG behavior and tool-capable Ace behavior.
-- Prefer the current focused paper and explicitly attached papers when present.
-- Use tools when the answer needs local paper lookup, parsed-paper RAG, arXiv, web search, favorites, or safe shell inspection.
-- Cite sources in Chinese answers using arXiv IDs, paper titles, database paper IDs, or URLs.
-- If evidence is missing, stale, contradictory, or tool configuration is unavailable, say so directly.
-- Keep final answers concise, but include enough references for the user to verify.
-- Do not fabricate papers, tool outputs, URLs, dates, or experimental results.
-- Tool Maker Agent should only create or delete tools when the task clearly benefits and the action is safe or approved.
-"""
+@register_agent(
+    key="inspiration",
+    tools={"search_database", "search_rag_database", "arxiv_search"},
+    priority=20,
+    parallel_group="exploration",
+)
+class InspirationAgent(BaseAgent):
+    name = "Inspiration Agent"
+    purpose = "Identify innovation points, hidden assumptions, and promising research angles."
+    when_to_use = "Use when the user asks for ideas, novelty, future work, research gaps, or deeper directions."
+    prompt_key = "agent_inspiration"
+
+
+@register_agent(
+    key="suggestion",
+    tools={"search_database", "list_favorite_folders"},
+    priority=30,
+    parallel_group="exploration",
+)
+class SuggestionAgent(BaseAgent):
+    name = "Suggestion Agent"
+    purpose = "Recommend papers and research directions aligned with the user's stated and inferred preferences."
+    when_to_use = "Use for recommendations, reading lists, next papers to study, or personalized direction finding."
+    prompt_key = "agent_suggestion"
+
+
+@register_agent(key="tool_maker", tools=set(), priority=50, parallel_group="synthesis")
+class ToolMakerAgent(BaseAgent):
+    name = "Tool Maker Agent"
+    purpose = "Decide whether a lightweight reusable tool or skill would materially improve the task."
+    when_to_use = "Use sparingly. Prefer existing tools; only suggest or create tools when repetition or precision justifies it."
+    prompt_key = "agent_tool_maker"
+
+
+@register_agent(key="evaluation", tools=set(), priority=1000, phase="evaluation", parallel_group="evaluation")
+class EvaluationAgent(BaseAgent):
+    name = "Evaluation Agent"
+    purpose = "Verify claims, require references, and flag uncertainty or missing evidence."
+    when_to_use = "Use before final answers and whenever claims depend on tools, papers, or current facts."
 
 
 INTENT_LABELS = {
@@ -91,28 +156,16 @@ INTENT_LABELS = {
     "evaluation": "verification, source checking, citation review, uncertainty assessment",
 }
 
+PAPER_ACE_AGENTS: tuple[AgentSpec, ...] = tuple(
+    agent.spec() for agent in sorted(_AGENT_REGISTRY.values(), key=lambda item: item.priority)
+)
 AGENTS_BY_KEY = {agent.key: agent for agent in PAPER_ACE_AGENTS}
+PAPER_ACE_AGENT_CHARTER = get_prompt_store().render("paper_ace_agent_charter")
+CLASSIFIER_SYSTEM_PROMPT = get_prompt_store().render("intent_classifier_system")
 
-CLASSIFIER_SYSTEM_PROMPT = """Classify the user's research-chat intent for routing.
 
-Return only compact JSON with this shape:
-{
-  "primary_intent": "research|summary|inspiration|suggestion|tool_maker|evaluation",
-  "intents": ["research"],
-  "agent_keys": ["research", "evaluation"],
-  "confidence": 0.0,
-  "rationale": "short routing reason"
-}
-
-Routing rules:
-- Always include evaluation.
-- Include research when the request asks for factual claims, paper lookup, source-backed answers, current/latest work, database/RAG/arXiv/web evidence, or attached/focused paper analysis.
-- Include inspiration for novelty, research gaps, innovation, brainstorming, future work, or creative research angles.
-- Include suggestion for recommendations, reading lists, next papers, preference-aware choices, or feedback about recommendations.
-- Include summary for summarization or long context compression.
-- Include tool_maker only for explicit reusable tool, script, automation, or skill requests.
-- Prefer multiple agents when the request combines intents.
-"""
+def get_registered_agent(key: str) -> BaseAgent:
+    return _AGENT_REGISTRY[key]
 
 
 def parse_intent_classification(raw: str) -> IntentClassification | None:
@@ -162,7 +215,6 @@ def normalize_intent_classification(payload: dict) -> IntentClassification:
 
 
 def fallback_intent_classification(message: str, has_long_history: bool = False) -> IntentClassification:
-    """Deterministic backup for offline/dev runs when the LLM classifier is unavailable."""
     lowered = message.lower()
     intents: list[str] = ["research"]
     if has_long_history or any(token in lowered for token in ("summary", "summarize", "总结", "概括", "简短")):
@@ -202,6 +254,9 @@ def agent_catalog() -> list[dict]:
             "name": agent.name,
             "purpose": agent.purpose,
             "whenToUse": agent.when_to_use,
+            "phase": agent.phase,
+            "priority": agent.priority,
+            "tools": list(agent.tools),
         }
         for agent in PAPER_ACE_AGENTS
     ]
@@ -215,3 +270,17 @@ def select_agents(
     if classification is None:
         classification = fallback_intent_classification(message, has_long_history=has_long_history)
     return [AGENTS_BY_KEY[key] for key in classification.agent_keys if key in AGENTS_BY_KEY]
+
+
+def build_execution_plan(classification: IntentClassification) -> ExecutionPlan:
+    selected = select_agents(classification=classification)
+    evaluation_agent = next((agent for agent in selected if agent.phase == "evaluation"), AGENTS_BY_KEY["evaluation"])
+    grouped: dict[str, list[AgentSpec]] = {}
+    ordered_groups: list[str] = []
+    for agent in sorted((item for item in selected if item.phase != "evaluation"), key=lambda item: item.priority):
+        if agent.parallel_group not in grouped:
+            grouped[agent.parallel_group] = []
+            ordered_groups.append(agent.parallel_group)
+        grouped[agent.parallel_group].append(agent)
+    batches = tuple(tuple(grouped[group]) for group in ordered_groups)
+    return ExecutionPlan(parallel_batches=batches, evaluation_agent=evaluation_agent)

@@ -2,6 +2,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
+from app.core.logging import log_event
 
 
 class AppError(Exception):
@@ -22,9 +23,10 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
 
 
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    log_event("error", "unhandled_exception", path=request.url.path, error=str(exc), error_type=exc.__class__.__name__)
     response = JSONResponse(
         status_code=500,
-        content={"error": {"code": "internal_error", "message": str(exc)}},
+        content={"error": {"code": "internal_error", "message": "Internal server error"}},
     )
     attach_cors(request, response)
     return response

@@ -9,6 +9,9 @@ PaperAgent 是一个面向论文阅读和研究方向探索的全栈 Agent 工�
 - 论文分析：通过 DeepSeek 或兼容 OpenAI 的接口生成论文总结、分类和标签；LLM 请求带 SQLite 缓存，降低重复调用成本。
 - 长期记忆：SQLite 保存论文、摘要、标签、用户偏好和 OCR 额度。
 - 短期记忆：SQLite 保存聊天 session 和消息，掉线后可恢复历史记录。
+- 多 Agent 编排：`Paper Ace Paper` 统一聊天入口基于 LangGraph 状态图执行 `classify -> candidate batches -> evaluation -> finalize`，支持动态 Agent 路由、批次推进和流式事件输出。
+- 运行时控制：为 workflow、agent、tool 增加超时、LLM 重试、每日 token/tool 预算和 prompt injection 基础防护。
+- 观测与持久化：记录 workflow、agent、tool 运行明细，以及每日 token、tool call、估算 cost 聚合，便于后续接 OpenTelemetry 或 LangSmith。
 - RAG 问答：解析后的 Markdown 会切块写入 SQLite FTS，Paper Chat 基于全文检索片段回答。
 - Daily Paper：支持按领域抓取指定日期论文，下载 PDF，转 Markdown，写入 ChromaDB，并生成缩略版与详细版总结。
 - 用户推荐：Ace Chat 会根据用户聊天内容、首页板块偏好和数据库论文进行推荐，可选 Brave Search 扩展外部搜索。
@@ -16,7 +19,7 @@ PaperAgent 是一个面向论文阅读和研究方向探索的全栈 Agent 工�
 
 ## 技术栈
 
-- 后端：FastAPI、SQLite、APScheduler、httpx
+- 后端：FastAPI、SQLite、APScheduler、httpx、LangGraph
 - 前端：React、Vite、TypeScript、原生 CSS
 - 外部服务：Arxiv Atom API、PaddleOCR API、DeepSeek 或 OpenAI 兼容 LLM、Brave Search API
 
@@ -28,9 +31,19 @@ paper-agent/
     app/core/              # 配置、错误、日志和安全响应头
     app/db/                # SQLite 连接和 schema
     app/features/          # papers、chat、users、tools
+      chat/                # LangGraph workflow、agent registry、prompt、memory、observability
   client/                  # React/Vite 前端
   docker-compose.yml
 ```
+
+## 多 Agent 架构
+
+- 统一入口：所有聊天请求归一化到 `paper_ace` 模式。
+- Agent 注册：`server/app/features/chat/agents.py` 通过注册式定义 Agent 的 phase、priority、parallel group 和 tool 集合。
+- 状态图编排：`server/app/features/chat/workflow.py` 使用 LangGraph 执行分类、候选批次、评估和收尾阶段。
+- Prompt 管理：`server/app/features/chat/prompts/*.md` 外置 Agent charter、分类器和评估 prompt，并记录版本指纹。
+- 运行时控制：`server/app/features/chat/runtime.py` 统一 token 预算、tool 预算、超时和重试参数。
+- 持久化观测：`chat_workflow_runs`、`chat_agent_runs`、`chat_tool_runs`、`chat_daily_usage` 表记录编排轨迹和资源使用。
 
 ## 本地开发
 
@@ -115,6 +128,18 @@ LLM_BASE_URL=https://api.deepseek.com
 LLM_API_KEY=replace-with-your-key
 LLM_MODEL=deepseek-chat
 LLM_INTERFACE=chat_completions
+LLM_REQUEST_TIMEOUT_SECONDS=120
+
+CHAT_WORKFLOW_TIMEOUT_SECONDS=180
+CHAT_AGENT_TIMEOUT_SECONDS=75
+CHAT_TOOL_TIMEOUT_SECONDS=30
+CHAT_LLM_RETRY_ATTEMPTS=2
+CHAT_LLM_RETRY_BACKOFF_SECONDS=1.5
+CHAT_PARALLEL_AGENT_LIMIT=3
+CHAT_AGENT_MAX_TOOL_TURNS=3
+CHAT_MAX_TOOL_CALLS_PER_AGENT=8
+CHAT_DAILY_USER_TOKEN_BUDGET=250000
+CHAT_DAILY_USER_TOOL_BUDGET=200
 
 PADDLEOCR_TOKEN=replace-with-your-token
 PADDLEOCR_DAILY_PAGE_LIMIT=20000
@@ -137,6 +162,7 @@ VITE_USER_ID=local-user
 - `PADDLEOCR_TOKEN` 不要写入代码仓库。
 - `LLM_INTERFACE=chat_completions` 适合 DeepSeek 和大多数 OpenAI 兼容服务。
 - 若要接 OpenAI Responses API，可把 `LLM_INTERFACE` 改为 `responses`，并设置对应 `LLM_BASE_URL` 和模型。
+- `CHAT_*` 配置用于限制 LangGraph workflow 的时长、并发度、预算和工具调用上限。
 
 ## 使用流程
 
@@ -205,6 +231,7 @@ paper-agent/data/
 cd paper-agent/server
 .venv/bin/python -m compileall app
 .venv/bin/python -c "from app.db.connection import init_db; init_db(); from app.main import health, ready; print(health()); print(ready())"
+.venv/bin/python -c "from app.features.chat.agents import build_execution_plan, parse_intent_classification; c=parse_intent_classification('{\"primary_intent\":\"research\",\"agent_keys\":[\"research\",\"summary\",\"evaluation\"]}'); plan=build_execution_plan(c); print([[a.key for a in batch] for batch in plan.parallel_batches], plan.evaluation_agent.key)"
 
 cd ../client
 npm run build

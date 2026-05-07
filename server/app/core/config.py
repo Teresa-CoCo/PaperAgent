@@ -21,6 +21,22 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_interface: str = "chat_completions"
     llm_max_context_chars: int = 14_000
+    llm_request_timeout_seconds: int = 120
+    llm_prompt_cost_usd_per_1k: float = 0.0
+    llm_completion_cost_usd_per_1k: float = 0.0
+
+    chat_prompt_dir: Path | None = None
+    chat_workflow_timeout_seconds: int = 180
+    chat_agent_timeout_seconds: int = 75
+    chat_tool_timeout_seconds: int = 30
+    chat_llm_retry_attempts: int = 2
+    chat_llm_retry_backoff_seconds: float = 1.5
+    chat_parallel_agent_limit: int = 3
+    chat_agent_max_tool_turns: int = 3
+    chat_max_tool_calls_per_agent: int = 8
+    chat_daily_user_token_budget: int = 250_000
+    chat_daily_user_tool_budget: int = 200
+    chat_estimated_chars_per_token: float = 3.6
 
     brave_api_key: str = ""
 
@@ -59,6 +75,8 @@ class Settings(BaseSettings):
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_root.mkdir(parents=True, exist_ok=True)
         self.rag_chroma_path.mkdir(parents=True, exist_ok=True)
+        if self.chat_prompt_dir:
+            self.chat_prompt_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

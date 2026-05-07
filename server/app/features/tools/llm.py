@@ -41,6 +41,10 @@ class ToolCall:
 class LLMResponse:
     content: str
     tool_calls: list[ToolCall] | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    model: str = ""
 
 
 class LLMClient:
@@ -121,6 +125,7 @@ class LLMClient:
         messages: list[ChatMessage],
         use_cache: bool = True,
         tools: list[dict] | None = None,
+        timeout_seconds: int | None = None,
     ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.settings.llm_model,
@@ -134,7 +139,7 @@ class LLMClient:
         if use_cache and not tools:
             cached = self._read_cache(cache_key)
             if cached:
-                return LLMResponse(content=cached)
+                return LLMResponse(content=cached, model=self.settings.llm_model)
 
         if not self.settings.llm_api_key:
             joined = "\n".join(message.content for message in messages[-2:])
@@ -144,13 +149,13 @@ class LLMClient:
             )
             if use_cache:
                 self._write_cache(cache_key, response_text)
-            return LLMResponse(content=response_text)
+            return LLMResponse(content=response_text, model="local-fallback")
 
         headers = {
             "Authorization": f"Bearer {self.settings.llm_api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=timeout_seconds or self.settings.llm_request_timeout_seconds) as client:
             if self.settings.llm_interface == "responses":
                 response = await client.post(
                     f"{self.settings.llm_base_url.rstrip('/')}/v1/responses",
@@ -162,7 +167,14 @@ class LLMClient:
                 )
                 response.raise_for_status()
                 data = response.json()
-                return LLMResponse(content=data.get("output_text") or json.dumps(data, ensure_ascii=False))
+                usage = data.get("usage") or {}
+                return LLMResponse(
+                    content=data.get("output_text") or json.dumps(data, ensure_ascii=False),
+                    prompt_tokens=int(usage.get("input_tokens", 0) or 0),
+                    completion_tokens=int(usage.get("output_tokens", 0) or 0),
+                    total_tokens=int(usage.get("total_tokens", 0) or 0),
+                    model=str(data.get("model") or self.settings.llm_model),
+                )
 
             response = await client.post(
                 f"{self.settings.llm_base_url.rstrip('/')}/chat/completions",
@@ -176,6 +188,7 @@ class LLMClient:
 
         response_text = msg.get("content") or ""
         raw_tool_calls = msg.get("tool_calls")
+        usage = data.get("usage") or {}
 
         tool_calls = None
         if raw_tool_calls:
@@ -193,7 +206,14 @@ class LLMClient:
         if use_cache and not tool_calls:
             self._write_cache(cache_key, response_text)
 
-        return LLMResponse(content=response_text, tool_calls=tool_calls)
+        return LLMResponse(
+            content=response_text,
+            tool_calls=tool_calls,
+            prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+            total_tokens=int(usage.get("total_tokens", 0) or 0),
+            model=str(data.get("model") or self.settings.llm_model),
+        )
 
     async def stream(self, messages: list[ChatMessage]) -> AsyncIterator[str]:
         if not self.settings.llm_api_key:
