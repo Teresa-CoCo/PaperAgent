@@ -194,6 +194,38 @@ class DailyPaperRAGStore:
             if ids:
                 collection.delete(ids=ids)
 
+    def query(
+        self,
+        query_text: str,
+        *,
+        n_results: int = 5,
+        where: dict | None = None,
+    ) -> list[dict]:
+        with self._embedder_lock:
+            collection = self._get_collection()
+            kwargs: dict = {
+                "query_texts": [query_text],
+                "n_results": min(n_results, 20),
+            }
+            if where:
+                kwargs["where"] = where
+            results = collection.query(**kwargs)
+        documents = results.get("documents", [[]])[0]
+        metadatas = results.get("metadatas", [[]])[0]
+        distances = results.get("distances", [[]])[0]
+        items: list[dict] = []
+        for doc, meta, dist in zip(documents, metadatas, distances):
+            items.append({
+                "content": doc,
+                "paper_id": meta.get("paper_id"),
+                "title": meta.get("title", ""),
+                "target_date": meta.get("target_date", ""),
+                "category": meta.get("category", ""),
+                "chunk_index": meta.get("chunk_index", 0),
+                "distance": dist,
+            })
+        return items
+
     def _chunk_markdown(self, markdown: str, chunk_size: int = 1400, overlap: int = 160) -> list[str]:
         text = markdown.strip()
         if not text:

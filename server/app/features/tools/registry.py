@@ -30,6 +30,7 @@ class ToolContext:
     user_preferences: Any  # UserPreferenceService
     brave_search: Any  # BraveSearchTool
     arxiv_tool: Any  # ArxivTool
+    daily_rag: Any = None  # DailyPaperRAGStore
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,36 @@ async def search_rag_database(
             "total_chunks": len(chunks),
         }
     )
+
+
+async def search_daily_rag(
+    query: str,
+    target_date: str = "",
+    category: str = "",
+    max_results: int = 5,
+    _ctx: ToolContext | None = None,
+) -> str:
+    """Search daily paper vector store (ChromaDB) by semantic similarity."""
+    if not _ctx or not _ctx.daily_rag:
+        return json.dumps({"error": "Daily paper RAG store not available"})
+    max_results = min(max_results, 20)
+    where = None
+    conditions = []
+    if target_date:
+        conditions.append({"target_date": target_date})
+    if category:
+        conditions.append({"category": category})
+    if len(conditions) == 1:
+        where = conditions[0]
+    elif len(conditions) > 1:
+        where = {"$and": conditions}
+    try:
+        items = _ctx.daily_rag.query(query, n_results=max_results, where=where)
+    except Exception as exc:
+        return json.dumps({"error": f"Daily paper RAG query failed: {exc}"})
+    if not items:
+        return json.dumps({"results": [], "message": "No relevant chunks found in daily papers."})
+    return json.dumps({"results": items, "total": len(items)})
 
 
 async def web_search(
@@ -217,6 +248,39 @@ def all_tools() -> list[ToolDef]:
                 "required": ["paper_id", "query"],
             },
             handler=search_rag_database,
+        ),
+        ToolDef(
+            name="search_daily_rag",
+            description=(
+                "Search the daily paper vector store (ChromaDB) using semantic similarity. "
+                "Use when the user asks about recent papers, daily digest content, "
+                "or wants to find semantically similar content across daily papers. "
+                "Supports filtering by target_date and category."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Semantic search query",
+                    },
+                    "target_date": {
+                        "type": "string",
+                        "description": "Filter by target date (YYYY-MM-DD format). Optional.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by arXiv category (e.g. cs.AI, cs.CL). Optional.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum results (default 5, max 20)",
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+            handler=search_daily_rag,
         ),
         ToolDef(
             name="web_search",

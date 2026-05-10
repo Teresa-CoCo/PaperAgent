@@ -13,6 +13,7 @@ from app.features.papers.arxiv_tool import ArxivTool
 from app.features.papers.service import PaperService
 from app.features.tools.brave_search import BraveSearchTool
 from app.features.tools.llm import LLMClient
+from app.features.daily_papers.service import DailyPaperRAGStore
 from app.features.users.service import UserPreferenceService, ensure_user
 
 
@@ -28,6 +29,7 @@ class ChatService:
         self.search_tool = BraveSearchTool()
         self.arxiv_tool = ArxivTool()
         self.agent_memory = AgentMemoryStore()
+        self.daily_rag = DailyPaperRAGStore()
         self.builder = ChatConversationBuilder(self.papers)
         self.workflow = PaperAceWorkflowEngine(
             llm=self.llm,
@@ -36,6 +38,7 @@ class ChatService:
             search_tool=self.search_tool,
             arxiv_tool=self.arxiv_tool,
             agent_memory=self.agent_memory,
+            daily_rag=self.daily_rag,
         )
 
     def create_session(self, user_id: str, scope: str, paper_id: int | None = None, title: str = "") -> dict:

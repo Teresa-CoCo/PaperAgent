@@ -97,6 +97,7 @@ class PaperAceWorkflowEngine:
         search_tool: Any,
         arxiv_tool: Any,
         agent_memory: Any,
+        daily_rag: Any = None,
     ) -> None:
         self.llm = llm
         self.papers = papers
@@ -104,6 +105,7 @@ class PaperAceWorkflowEngine:
         self.search_tool = search_tool
         self.arxiv_tool = arxiv_tool
         self.agent_memory = agent_memory
+        self.daily_rag = daily_rag
         self.prompts = get_prompt_store()
         self.runtime = get_chat_runtime_settings()
         self.store = ChatWorkflowStore()
@@ -812,6 +814,7 @@ class PaperAceWorkflowEngine:
             user_preferences=self.preferences,
             brave_search=self.search_tool,
             arxiv_tool=self.arxiv_tool,
+            daily_rag=self.daily_rag,
         )
 
     def _assert_token_budget(self, user_id: str, messages: list[ChatMessage]) -> None:

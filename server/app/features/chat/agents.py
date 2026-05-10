@@ -87,14 +87,14 @@ def register_agent(*, key: str, tools: set[str] | tuple[str, ...], priority: int
 
 @register_agent(
     key="research",
-    tools={"search_database", "search_rag_database", "web_search", "arxiv_search"},
+    tools={"search_database", "search_rag_database", "search_daily_rag", "web_search", "arxiv_search"},
     priority=10,
     parallel_group="exploration",
 )
 class ResearchAgent(BaseAgent):
     name = "Research Agent"
-    purpose = "Search local SQL papers, parsed RAG chunks, arXiv, and web sources for the user's research request."
-    when_to_use = "Use for paper lookup, factual questions, literature search, and any request needing external or database evidence."
+    purpose = "Search local SQL papers, parsed RAG chunks, daily paper vector store, arXiv, and web sources for the user's research request."
+    when_to_use = "Use for paper lookup, factual questions, literature search, daily paper semantic search, and any request needing external or database evidence."
     prompt_key = "agent_research"
 
 
@@ -108,7 +108,7 @@ class SummaryAgent(BaseAgent):
 
 @register_agent(
     key="inspiration",
-    tools={"search_database", "search_rag_database", "arxiv_search"},
+    tools={"search_database", "search_rag_database", "search_daily_rag", "arxiv_search"},
     priority=20,
     parallel_group="exploration",
 )
@@ -121,7 +121,7 @@ class InspirationAgent(BaseAgent):
 
 @register_agent(
     key="suggestion",
-    tools={"search_database", "list_favorite_folders"},
+    tools={"search_database", "search_daily_rag", "list_favorite_folders"},
     priority=30,
     parallel_group="exploration",
 )
@@ -148,7 +148,7 @@ class EvaluationAgent(BaseAgent):
 
 
 INTENT_LABELS = {
-    "research": "paper lookup, factual question, literature search, evidence gathering, local RAG, arXiv, or web search",
+    "research": "paper lookup, factual question, literature search, evidence gathering, local RAG, daily paper vector search, arXiv, or web search",
     "summary": "summarization or compression of long context/results",
     "inspiration": "novel ideas, innovation points, research gaps, future work, or creative directions",
     "suggestion": "recommendations, reading lists, next papers, or personalized direction finding",
