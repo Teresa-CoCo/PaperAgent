@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 
+from app.core.chunking import chunk_markdown
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db.connection import transaction
@@ -168,7 +169,7 @@ class DailyPaperRAGStore:
     ) -> int:
         with self._embedder_lock:
             collection = self._get_collection()
-            chunks = self._chunk_markdown(markdown)
+            chunks = self._chunk_markdown(markdown, title=title)
             if not chunks:
                 return 0
             base = f"{target_date}:{category}:{paper_id}"
@@ -179,11 +180,12 @@ class DailyPaperRAGStore:
                     "target_date": target_date,
                     "category": category,
                     "title": title,
+                    "section": c["section"],
                     "chunk_index": index,
                 }
-                for index in range(len(chunks))
+                for index, c in enumerate(chunks)
             ]
-            collection.upsert(ids=ids, documents=chunks, metadatas=metadatas)
+            collection.upsert(ids=ids, documents=[c["content"] for c in chunks], metadatas=metadatas)
             return len(chunks)
 
     def delete_daily_paper(self, paper_id: int, target_date: str, category: str) -> None:
@@ -215,10 +217,13 @@ class DailyPaperRAGStore:
         distances = results.get("distances", [[]])[0]
         items: list[dict] = []
         for doc, meta, dist in zip(documents, metadatas, distances):
+            section = meta.get("section", "")
+            content = f"[Section: {section}]\n{doc}" if section else doc
             items.append({
-                "content": doc,
+                "content": content,
                 "paper_id": meta.get("paper_id"),
                 "title": meta.get("title", ""),
+                "section": section,
                 "target_date": meta.get("target_date", ""),
                 "category": meta.get("category", ""),
                 "chunk_index": meta.get("chunk_index", 0),
@@ -226,17 +231,17 @@ class DailyPaperRAGStore:
             })
         return items
 
-    def _chunk_markdown(self, markdown: str, chunk_size: int = 1400, overlap: int = 160) -> list[str]:
-        text = markdown.strip()
-        if not text:
-            return []
-        chunks: list[str] = []
-        step = max(200, chunk_size - overlap)
-        for start in range(0, len(text), step):
-            chunk = text[start : start + chunk_size].strip()
-            if chunk:
-                chunks.append(chunk)
-        return chunks
+    def _chunk_markdown(self, markdown: str, title: str = "") -> list[dict]:
+        cfg = self.settings
+        header_levels = [h.strip() for h in cfg.chunk_header_levels.split(",")]
+        result = chunk_markdown(
+            markdown,
+            title=title,
+            chunk_size_tokens=cfg.chunk_size_tokens,
+            overlap_tokens=cfg.chunk_overlap_tokens,
+            header_levels=header_levels,
+        )
+        return [{"content": c.content, "section": c.section} for c in result]
 
 
 class DailyPaperService:

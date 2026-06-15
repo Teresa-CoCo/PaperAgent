@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS paper_chunks (
   paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
   chunk_index INTEGER NOT NULL,
   content TEXT NOT NULL,
+  section TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(paper_id, chunk_index)
 );

@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     rag_embedding_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
     rag_embedding_max_length: int = 2048
 
+    chunk_header_levels: str = "#,##,###"
+    chunk_size_tokens: int = 600
+    chunk_overlap_tokens: int = 75
+
     @staticmethod
     def csv_list(value: str) -> list[str]:
         return [item.strip() for item in value.split(",") if item.strip()]

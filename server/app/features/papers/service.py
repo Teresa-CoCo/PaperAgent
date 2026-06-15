@@ -5,6 +5,7 @@ from pathlib import Path
 
 import httpx
 
+from app.core.chunking import chunk_markdown
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db.connection import transaction
@@ -809,7 +810,9 @@ class PaperService:
                 """,
                 (str(markdown_path), str(storage_dir), paper_id),
             )
-        self.replace_chunks(paper_id, markdown)
+            row = connection.execute("SELECT title FROM papers WHERE id = ?", (paper_id,)).fetchone()
+            title = row["title"] if row else ""
+        self.replace_chunks(paper_id, markdown, title)
 
     def storage_dir_for(self, paper_id: int, category: str) -> Path:
         safe_category = category.replace("/", "_")
@@ -901,7 +904,7 @@ class PaperService:
                 ),
             )
         if markdown:
-            self.replace_chunks(paper_id, markdown)
+            self.replace_chunks(paper_id, markdown, paper.get("title", ""))
         return {"paperId": paper_id, "analysis": parsed}
 
     def _parse_analysis(self, response: str) -> dict:
@@ -915,26 +918,34 @@ class PaperService:
         parsed.setdefault("tags", [])
         return parsed
 
-    def replace_chunks(self, paper_id: int, content: str, chunk_size: int = 1600) -> None:
-        chunks = [content[index : index + chunk_size] for index in range(0, len(content), chunk_size)]
+    def replace_chunks(self, paper_id: int, content: str, title: str = "") -> None:
+        cfg = self.settings
+        header_levels = [h.strip() for h in cfg.chunk_header_levels.split(",")]
+        chunks = chunk_markdown(
+            content,
+            title=title,
+            chunk_size_tokens=cfg.chunk_size_tokens,
+            overlap_tokens=cfg.chunk_overlap_tokens,
+            header_levels=header_levels,
+        )
         with transaction() as connection:
             connection.execute("DELETE FROM paper_chunks WHERE paper_id = ?", (paper_id,))
             connection.execute("DELETE FROM paper_chunks_fts WHERE paper_id = ?", (paper_id,))
-            for index, chunk in enumerate(chunks):
+            for index, c in enumerate(chunks):
                 cursor = connection.execute(
-                    "INSERT INTO paper_chunks(paper_id, chunk_index, content) VALUES(?, ?, ?)",
-                    (paper_id, index, chunk),
+                    "INSERT INTO paper_chunks(paper_id, chunk_index, content, section) VALUES(?, ?, ?, ?)",
+                    (paper_id, index, c.content, c.section),
                 )
                 chunk_id = cursor.lastrowid
                 connection.execute(
                     "INSERT INTO paper_chunks_fts(rowid, content, paper_id, chunk_id) VALUES(?, ?, ?, ?)",
-                    (chunk_id, chunk, paper_id, chunk_id),
+                    (chunk_id, c.content, paper_id, chunk_id),
                 )
 
     def retrieve_context(self, paper_id: int | None, query: str, limit: int = 5) -> list[str]:
         params: list[object] = [query]
         sql = """
-            SELECT c.content
+            SELECT c.content, c.section
             FROM paper_chunks_fts f
             JOIN paper_chunks c ON c.id = f.chunk_id
             WHERE paper_chunks_fts MATCH ?
@@ -949,7 +960,10 @@ class PaperService:
                 rows = connection.execute(sql, params).fetchall()
         except Exception:
             rows = []
-        return [row["content"] for row in rows]
+        return [
+            f"[Section: {row['section']}]\n{row['content']}" if row["section"] else row["content"]
+            for row in rows
+        ]
 
     async def translate_selection(self, paper_id: int, selection: str, context: str = "") -> dict:
         paper = self.get_paper(paper_id)
