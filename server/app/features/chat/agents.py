@@ -87,7 +87,7 @@ def register_agent(*, key: str, tools: set[str] | tuple[str, ...], priority: int
 
 @register_agent(
     key="research",
-    tools={"search_database", "search_rag_database", "search_daily_rag", "web_search", "arxiv_search"},
+    tools={"search_database", "search_rag_database", "search_daily_rag", "web_search", "arxiv_search", "shell_execute"},
     priority=10,
     parallel_group="exploration",
 )

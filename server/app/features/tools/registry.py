@@ -401,10 +401,19 @@ def all_tools() -> list[ToolDef]:
 SAFE_COMMAND_PREFIXES = (
     "ls", "pwd", "echo ", "cat ", "head ", "tail ", "wc ", "sort ", "grep ",
     "find ", "which ", "whoami", "date", "uname", "df ", "du ", "free",
-    "ps ", "env", "printenv", "python3 --version", "python --version",
-    "node --version", "npm --version", "tsc --version",
+    "ps ", "env", "printenv", "python3", "python",
+    "node", "npm", "tsc",
     "git status", "git log", "git diff", "git branch", "git remote",
     "git config", "pip list", "pip show",
+    "mkdir", "mkdir ",
+    "curl", "curl ",
+    "wget", "wget ",
+    "cp ", "mv ",
+    "touch ", "chmod ",
+    "file ", "stat ", "readlink",
+    "ping ", "dig ", "nslookup",
+    "pip install ", "pip3 install ",
+    "python3 -c", "python -c",
 )
 
 
@@ -425,7 +434,18 @@ async def shell_execute(
     timeout: int = 30,
     _ctx: ToolContext | None = None,
 ) -> str:
-    """Execute a shell command and return its output."""
+    """Execute a shell command and return its output.
+
+    Non-dangerous commands are executed directly. Dangerous commands
+    require user approval via the approval system.
+    """
+    danger = is_dangerous_command(command)
+    if danger is not None:
+        return json.dumps({
+            "error": f"Command blocked: {danger}",
+            "hint": "This command requires user approval. "
+                    "The tool maker agent can help wrap approved commands into reusable tools.",
+        })
     proc = await asyncio.wait_for(
         asyncio.create_subprocess_shell(
             command,
