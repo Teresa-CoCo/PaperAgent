@@ -369,10 +369,10 @@ def all_tools() -> list[ToolDef]:
         ToolDef(
             name="shell_execute",
             description=(
-                "Execute a shell command (read-only or sandboxed). "
-                "Use this to run terminal commands like file operations, git, python scripts, "
-                "package checks, or any system command. "
-                "Dangerous commands (rm, sudo, apt, install, etc.) require user approval."
+                "Execute a shell command. "
+                "Use this to run terminal commands: file operations (mkdir, cp, mv, curl, wget), "
+                "git, python scripts, package checks, or any system command. "
+                "Safe commands run automatically; destructive ones (rm, sudo) are blocked."
             ),
             parameters={
                 "type": "object",

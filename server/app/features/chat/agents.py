@@ -108,7 +108,7 @@ class SummaryAgent(BaseAgent):
 
 @register_agent(
     key="inspiration",
-    tools={"search_database", "search_rag_database", "search_daily_rag", "arxiv_search"},
+    tools={"search_database", "search_rag_database", "search_daily_rag", "arxiv_search", "shell_execute"},
     priority=20,
     parallel_group="exploration",
 )
@@ -121,7 +121,7 @@ class InspirationAgent(BaseAgent):
 
 @register_agent(
     key="suggestion",
-    tools={"search_database", "search_daily_rag", "list_favorite_folders"},
+    tools={"search_database", "search_daily_rag", "list_favorite_folders", "shell_execute"},
     priority=30,
     parallel_group="exploration",
 )
@@ -132,7 +132,7 @@ class SuggestionAgent(BaseAgent):
     prompt_key = "agent_suggestion"
 
 
-@register_agent(key="tool_maker", tools=set(), priority=50, parallel_group="synthesis")
+@register_agent(key="tool_maker", tools={"shell_execute"}, priority=50, parallel_group="synthesis")
 class ToolMakerAgent(BaseAgent):
     name = "Tool Maker Agent"
     purpose = "Decide whether a lightweight reusable tool or skill would materially improve the task."
