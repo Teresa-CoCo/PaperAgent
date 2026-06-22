@@ -89,6 +89,52 @@ CREATE TABLE IF NOT EXISTS agent_memories (
   PRIMARY KEY(user_id, agent_key)
 );
 
+CREATE TABLE IF NOT EXISTS langgraph_store_items (
+  namespace TEXT NOT NULL,
+  item_key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT '{}',
+  indexed_text TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(namespace, item_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_langgraph_store_namespace
+ON langgraph_store_items(namespace);
+
+CREATE TABLE IF NOT EXISTS langgraph_checkpoints (
+  thread_id TEXT NOT NULL,
+  checkpoint_ns TEXT NOT NULL DEFAULT '',
+  checkpoint_id TEXT NOT NULL,
+  parent_checkpoint_id TEXT,
+  checkpoint_type TEXT NOT NULL,
+  checkpoint_blob BLOB NOT NULL,
+  metadata_type TEXT NOT NULL,
+  metadata_blob BLOB NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(thread_id, checkpoint_ns, checkpoint_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_langgraph_checkpoints_thread
+ON langgraph_checkpoints(thread_id, checkpoint_ns, checkpoint_id DESC);
+
+CREATE TABLE IF NOT EXISTS langgraph_checkpoint_writes (
+  thread_id TEXT NOT NULL,
+  checkpoint_ns TEXT NOT NULL DEFAULT '',
+  checkpoint_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  task_path TEXT NOT NULL DEFAULT '',
+  write_idx INTEGER NOT NULL,
+  channel TEXT NOT NULL,
+  value_type TEXT NOT NULL,
+  value_blob BLOB NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(thread_id, checkpoint_ns, checkpoint_id, task_id, write_idx)
+);
+
+CREATE INDEX IF NOT EXISTS idx_langgraph_checkpoint_writes_thread
+ON langgraph_checkpoint_writes(thread_id, checkpoint_ns, checkpoint_id);
+
 CREATE TABLE IF NOT EXISTS ocr_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   paper_id INTEGER REFERENCES papers(id) ON DELETE SET NULL,

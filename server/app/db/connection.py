@@ -1,9 +1,12 @@
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 from app.core.config import get_settings
+
+_DB_LOCK = threading.RLock()
 
 
 def dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -13,7 +16,7 @@ def dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
 
 def connect() -> sqlite3.Connection:
     settings = get_settings()
-    connection = sqlite3.connect(settings.database_path, check_same_thread=False)
+    connection = sqlite3.connect(settings.database_path, check_same_thread=False, timeout=30)
     connection.row_factory = dict_factory
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
@@ -21,15 +24,16 @@ def connect() -> sqlite3.Connection:
 
 @contextmanager
 def transaction() -> Iterator[sqlite3.Connection]:
-    connection = connect()
-    try:
-        yield connection
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()
+    with _DB_LOCK:
+        connection = connect()
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
 
 def init_db() -> None:

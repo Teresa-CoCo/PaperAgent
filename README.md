@@ -9,6 +9,7 @@ PaperAgent 是一个面向论文阅读和研究方向探索的全栈 Agent 工�
 - 论文分析：通过 DeepSeek 或兼容 OpenAI 的接口生成论文总结、分类和标签；LLM 请求带 SQLite 缓存，降低重复调用成本。
 - 长期记忆：SQLite 保存论文、摘要、标签、用户偏好和 OCR 额度。
 - 短期记忆：SQLite 保存聊天 session 和消息，掉线后可恢复历史记录。
+- 完整记忆系统：Ace Workflow 额外维护会话摘要记忆、用户画像记忆和 episode 记忆，并在每轮开始时召回、在每轮结束时回写。
 - 多 Agent 编排：`Paper Ace Paper` 统一聊天入口基于 LangGraph 状态图执行 `classify -> candidate batches -> evaluation -> finalize`，支持动态 Agent 路由、批次推进和流式事件输出。
 - 运行时控制：为 workflow、agent、tool 增加超时、LLM 重试、每日 token/tool 预算和 prompt injection 基础防护。
 - 观测与持久化：记录 workflow、agent、tool 运行明细，以及每日 token、tool call、估算 cost 聚合，便于后续接 OpenTelemetry 或 LangSmith。
@@ -41,6 +42,7 @@ paper-agent/
 - 统一入口：所有聊天请求归一化到 `paper_ace` 模式。
 - Agent 注册：`server/app/features/chat/agents.py` 通过注册式定义 Agent 的 phase、priority、parallel group 和 tool 集合。
 - 状态图编排：`server/app/features/chat/workflow.py` 使用 LangGraph 执行分类、候选批次、评估和收尾阶段。
+- LangGraph Store：`server/app/features/chat/persistence.py` 提供 SQLite 持久化 store，供 workflow 在 runtime context 中读取和写入会话/画像/episode 记忆。
 - Prompt 管理：`server/app/features/chat/prompts/*.md` 外置 Agent charter、分类器和评估 prompt，并记录版本指纹。
 - 运行时控制：`server/app/features/chat/runtime.py` 统一 token 预算、tool 预算、超时和重试参数。
 - 持久化观测：`chat_workflow_runs`、`chat_agent_runs`、`chat_tool_runs`、`chat_daily_usage` 表记录编排轨迹和资源使用。

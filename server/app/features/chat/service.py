@@ -8,6 +8,7 @@ from app.db.connection import transaction
 from app.features.chat.agents import agent_catalog
 from app.features.chat.conversation import ChatConversationBuilder, citation_report
 from app.features.chat.memory import AgentMemoryStore
+from app.features.chat.persistence import SQLiteCheckpointer, SQLiteStore
 from app.features.chat.workflow import PaperAceWorkflowEngine, WorkflowRequest
 from app.features.papers.arxiv_tool import ArxivTool
 from app.features.papers.service import PaperService
@@ -31,6 +32,8 @@ class ChatService:
         self.agent_memory = AgentMemoryStore()
         self.daily_rag = DailyPaperRAGStore()
         self.builder = ChatConversationBuilder(self.papers)
+        self.memory_store = SQLiteStore()
+        self.checkpointer = SQLiteCheckpointer()
         self.workflow = PaperAceWorkflowEngine(
             llm=self.llm,
             papers=self.papers,
@@ -132,6 +135,8 @@ class ChatService:
             if not row:
                 raise AppError("Chat session not found", 404, "chat_session_not_found")
             connection.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+        self.workflow.memory_manager.clear_session_memory(self.memory_store, user_id, session_id)
+        self.checkpointer.delete_thread(session_id)
         return {"deletedSessionId": session_id}
 
     async def reply(

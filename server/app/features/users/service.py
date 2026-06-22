@@ -2,6 +2,8 @@ import json
 import re
 
 from app.db.connection import transaction
+from app.features.chat.memory_system import ConversationMemoryManager
+from app.features.chat.persistence import SQLiteCheckpointer, SQLiteStore
 from app.features.papers.service import paper_to_api
 from app.features.tools.llm import ChatMessage, LLMClient
 
@@ -98,6 +100,9 @@ class UserPreferenceService:
 
     def clear_chat_memory(self, user_id: str) -> dict:
         ensure_user(user_id)
+        memory_store = SQLiteStore()
+        checkpointer = SQLiteCheckpointer()
+        memory_manager = ConversationMemoryManager(LLMClient())
         with transaction() as connection:
             session_ids = [
                 row["id"]
@@ -105,8 +110,10 @@ class UserPreferenceService:
             ]
             for session_id in session_ids:
                 connection.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+                checkpointer.delete_thread(session_id)
             connection.execute("DELETE FROM chat_sessions WHERE user_id = ?", (user_id,))
-        return {"deletedSessions": len(session_ids)}
+        memory_result = memory_manager.clear_user_memory(memory_store, user_id)
+        return {"deletedSessions": len(session_ids), **memory_result}
 
     def delete_unfavorited_papers(self, user_id: str) -> dict:
         ensure_user(user_id)

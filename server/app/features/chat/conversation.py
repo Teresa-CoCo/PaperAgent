@@ -9,15 +9,25 @@ from app.features.tools.llm import ChatMessage
 class ChatConversationBuilder:
     papers: object
 
-    def history_to_chat_messages(self, rows: list[dict]) -> list[ChatMessage]:
+    def history_to_chat_messages(self, rows: list[dict], limit: int | None = None) -> list[ChatMessage]:
         messages: list[ChatMessage] = []
-        for row in rows:
+        selected_rows = rows[-limit:] if limit is not None else rows
+        for row in selected_rows:
             role = row.get("role")
             content = (row.get("content") or "").strip()
             if role not in {"user", "assistant"} or not content:
                 continue
             messages.append(ChatMessage(role=role, content=content[:6000]))
         return messages
+
+    def memory_system_prompt(self, memory_block: str) -> str:
+        if not memory_block.strip():
+            return "No recalled conversation memory."
+        return (
+            "Conversation memory below is authoritative only for stable user preferences, "
+            "session progress, and previously established evidence. Re-check factual claims when needed.\n"
+            f"{memory_block[:5000]}"
+        )
 
     def attachment_papers(self, paper_ids: list[int] | None, exclude_paper_id: int | None = None) -> list[dict]:
         if not paper_ids:
