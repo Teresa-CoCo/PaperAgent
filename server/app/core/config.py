@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     chat_daily_user_token_budget: int = 250_000
     chat_daily_user_tool_budget: int = 200
     chat_estimated_chars_per_token: float = 3.6
+    chat_shell_tool_enabled: bool = False
 
     brave_api_key: str = ""
 

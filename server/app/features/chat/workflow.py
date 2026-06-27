@@ -687,6 +687,7 @@ class PaperAceWorkflowEngine:
                         parsed_result = await self._execute_tool(
                             workflow_id=workflow_id,
                             agent=agent,
+                            allowed_tool_names=allowed_tool_names,
                             tool_call_id=f"{agent.key}-{tool_call.id}",
                             name=tool_call.function["name"],
                             arguments=tool_call.function["arguments"],
@@ -775,6 +776,7 @@ class PaperAceWorkflowEngine:
         *,
         workflow_id: str,
         agent: AgentSpec,
+        allowed_tool_names: set[str],
         tool_call_id: str,
         name: str,
         arguments: str,
@@ -782,6 +784,8 @@ class PaperAceWorkflowEngine:
         request: WorkflowRequest,
         trace: WorkflowTrace,
     ) -> dict:
+        if name not in allowed_tool_names:
+            return {"error": f"Tool '{name}' is not allowed for agent '{agent.key}'"}
         self._assert_tool_budget(request.user_id)
         await self._emit_event(
             workflow_id,

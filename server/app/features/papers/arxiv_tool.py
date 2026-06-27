@@ -121,6 +121,30 @@ class ArxivTool:
                 start += len(entries)
         return papers
 
+    async def search(self, query: str, category: str | None = None, max_results: int = 20) -> list[dict]:
+        terms = [
+            re.sub(r"[^A-Za-z0-9_.-]", "", term)
+            for term in query.split()
+        ]
+        terms = [term for term in terms if len(term) >= 2][:8]
+        search_parts = []
+        if category:
+            search_parts.append(f"cat:{category}")
+        search_parts.extend(f"all:{term}" for term in terms)
+        if not search_parts:
+            return await self.query(category or "cs.AI", max_results=max_results)
+        search_query = urllib.parse.quote(" AND ".join(search_parts))
+        url = (
+            "https://export.arxiv.org/api/query"
+            f"?search_query={search_query}&sortBy=relevance&sortOrder=descending"
+            f"&start=0&max_results={max(1, min(max_results, ARXIV_QUERY_PAGE_SIZE))}"
+        )
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await self._get(client, url)
+            response.raise_for_status()
+            root = ET.fromstring(response.text)
+        return [self._paper_from_atom(entry, category) for entry in root.findall(f"{ATOM}entry")]
+
     def _paper_from_atom(self, entry: ET.Element, requested_category: str | None = None) -> dict:
         arxiv_id, version = _arxiv_id_and_version(_text(entry, "id"))
         links = entry.findall(f"{ATOM}link")

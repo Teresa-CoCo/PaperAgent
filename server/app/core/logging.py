@@ -62,4 +62,6 @@ async def security_headers_middleware(
     response.headers["x-content-type-options"] = "nosniff"
     response.headers["x-frame-options"] = "DENY"
     response.headers["referrer-policy"] = "strict-origin-when-cross-origin"
+    response.headers["permissions-policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["content-security-policy"] = "frame-ancestors 'none'"
     return response

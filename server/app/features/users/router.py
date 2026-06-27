@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.features.users.service import UserPreferenceService, ensure_user
 from app.shared.http import current_user_id
@@ -9,7 +9,7 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 
 
 class PreferenceRequest(BaseModel):
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=20_000)
 
 
 class FolderRequest(BaseModel):
@@ -27,7 +27,7 @@ def update_preferences(payload: PreferenceRequest, user_id: str = Depends(curren
 
 
 @router.get("/recommendations")
-async def recommendations(user_id: str = Depends(current_user_id), limit: int = 10) -> dict:
+async def recommendations(user_id: str = Depends(current_user_id), limit: int = Query(10, ge=1, le=50)) -> dict:
     ensure_user(user_id)
     return {"items": await UserPreferenceService().ai_recommendations(user_id, limit)}
 
@@ -69,6 +69,8 @@ def favorite_paper(payload: FavoriteRequest, user_id: str = Depends(current_user
 
 @router.get("/favorites")
 def favorite_papers(
-    user_id: str = Depends(current_user_id), folderId: int | None = None, limit: int = 50
+    user_id: str = Depends(current_user_id),
+    folderId: int | None = None,
+    limit: int = Query(50, ge=1, le=200),
 ) -> dict:
     return {"items": UserPreferenceService().favorite_papers(user_id, folderId, limit)}

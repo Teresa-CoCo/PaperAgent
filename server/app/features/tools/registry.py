@@ -4,6 +4,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.core.config import get_settings
 from app.db.connection import transaction
 from app.features.papers.service import PaperService, paper_to_api
 from app.features.tools.llm import ChatMessage, LLMClient
@@ -144,7 +145,7 @@ async def arxiv_search(
     max_results = min(max_results, 50)
     target_category = category or _ctx.paper_service.settings.default_arxiv_category_list[0]
     try:
-        papers = await _ctx.arxiv_tool.query(target_category, max_results=max_results)
+        papers = await _ctx.arxiv_tool.search(query, target_category, max_results=max_results)
     except Exception as exc:
         return json.dumps({"error": f"arXiv search failed: {exc}"})
     compact = []
@@ -201,7 +202,7 @@ async def add_to_favorites(
 # ---------------------------------------------------------------------------
 
 def all_tools() -> list[ToolDef]:
-    return [
+    tools = [
         ToolDef(
             name="search_database",
             description=(
@@ -366,10 +367,12 @@ def all_tools() -> list[ToolDef]:
             },
             handler=add_to_favorites,
         ),
-        ToolDef(
+    ]
+    if get_settings().chat_shell_tool_enabled:
+        tools.append(ToolDef(
             name="shell_execute",
             description=(
-                "Execute a shell command. "
+                "Execute a local development shell command. "
                 "Use this to run terminal commands: file operations (mkdir, cp, mv, curl, wget), "
                 "git, python scripts, package checks, or any system command. "
                 "Safe commands run automatically; destructive ones (rm, sudo) are blocked."
@@ -390,8 +393,8 @@ def all_tools() -> list[ToolDef]:
                 "required": ["command"],
             },
             handler=shell_execute,
-        ),
-    ]
+        ))
+    return tools
 
 
 # ---------------------------------------------------------------------------

@@ -25,12 +25,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_db()
     scheduler = create_scheduler()
     scheduler.start()
-    asyncio.create_task(PaperService().run_crawl_queue())
-    asyncio.create_task(DailyPaperService().run_queue())
-    asyncio.create_task(ChatService().run_mission_queue())
+    background_tasks = [
+        asyncio.create_task(PaperService().run_crawl_queue(), name="paper-crawl-queue"),
+        asyncio.create_task(DailyPaperService().run_queue(), name="daily-paper-queue"),
+        asyncio.create_task(ChatService().run_mission_queue(), name="chat-mission-queue"),
+    ]
     try:
         yield
     finally:
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
         scheduler.shutdown(wait=False)
 
 

@@ -1,7 +1,6 @@
 import { memo, useMemo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
-import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
@@ -9,14 +8,12 @@ import "katex/dist/katex.min.css";
 type Props = {
   children?: string;
   className?: string;
-  allowRawHtml?: boolean;
   compact?: boolean;
   resolveImage?: (src?: string) => string;
 };
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath];
 const REHYPE_PLUGINS = [rehypeKatex];
-const REHYPE_RAW_PLUGINS = [rehypeRaw, rehypeKatex];
 const COMPACT_COMPONENTS: Components = {
   p: ({ children: content }: { children?: ReactNode }) => <span>{content}</span>,
   strong: ({ children: content }: { children?: ReactNode }) => <strong>{content}</strong>,
@@ -62,7 +59,6 @@ export function normalizeLatexMarkdown(value = "") {
 export const MarkdownText = memo(function MarkdownText({
   children = "",
   className,
-  allowRawHtml = false,
   compact = false,
   resolveImage
 }: Props) {
@@ -79,7 +75,7 @@ export const MarkdownText = memo(function MarkdownText({
     <div className={className}>
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
-        rehypePlugins={allowRawHtml ? REHYPE_RAW_PLUGINS : REHYPE_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
         components={components}
       >
         {normalized}

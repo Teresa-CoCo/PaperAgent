@@ -37,10 +37,15 @@ export function PaperViewer({
   const [markdownMode, setMarkdownMode] = useState<"preview" | "source">("preview");
 
   const resolveMarkdownAsset = useCallback((src?: string) => {
-    if (!src) return "";
-    if (/^(https?:|data:|blob:|#|\/)/i.test(src)) return src;
-    if (!paper?.assetBasePath) return src;
-    return `${API_BASE_URL}${paper.assetBasePath}/${src.replace(/^\.\//, "")}`;
+    const value = (src || "").trim();
+    if (!value) return "";
+    if (/^(data:|blob:|javascript:)/i.test(value)) return "";
+    if (/^(https?:|\/)/i.test(value)) return value;
+    if (!paper?.assetBasePath) return value;
+    const cleanPath = value.replace(/^\.\//, "");
+    const parts = cleanPath.split("/").filter(Boolean);
+    if (!parts.length || parts.some((part) => part === "." || part === "..")) return "";
+    return `${API_BASE_URL}${paper.assetBasePath}/${parts.map(encodeURIComponent).join("/")}`;
   }, [paper?.assetBasePath]);
 
   const selectViewMode = (mode: "summary" | "markdown" | "pdf") => {
@@ -127,7 +132,7 @@ export function PaperViewer({
                 </div>
               </div>
               {markdownMode === "preview" ? (
-                <MarkdownText className="markdown-preview" allowRawHtml resolveImage={resolveMarkdownAsset}>
+                <MarkdownText className="markdown-preview" resolveImage={resolveMarkdownAsset}>
                   {paper.markdown}
                 </MarkdownText>
               ) : (

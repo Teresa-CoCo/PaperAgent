@@ -1,7 +1,7 @@
 import httpx
 import asyncio
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.core.config import get_settings
 from app.core.errors import AppError
@@ -14,9 +14,9 @@ router = APIRouter(prefix="/api", tags=["papers"])
 
 
 class CrawlRequest(BaseModel):
-    category: str = Field(default="cs.AI", min_length=2)
-    maxResults: int = Field(default=20, ge=1, le=100)
-    dateFilters: list[dict[str, str]] = Field(default_factory=list)
+    category: str = Field(default="cs.AI", min_length=2, max_length=32)
+    maxResults: int = Field(default=20, ge=1, le=50)
+    dateFilters: list[dict[str, str]] = Field(default_factory=list, max_length=31)
 
 
 class AnalyzeRequest(BaseModel):
@@ -24,8 +24,8 @@ class AnalyzeRequest(BaseModel):
 
 
 class TranslateRequest(BaseModel):
-    selection: str = Field(min_length=1)
-    context: str = ""
+    selection: str = Field(min_length=1, max_length=5_000)
+    context: str = Field(default="", max_length=10_000)
 
 
 def parse_date_filters(value: str | None) -> list[dict[str, str]]:
@@ -57,11 +57,11 @@ def public_config() -> dict:
 
 @router.get("/papers")
 def list_papers(
-    category: str | None = None,
-    query: str | None = None,
-    limit: int = 50,
+    category: str | None = Query(None, max_length=32),
+    query: str | None = Query(None, max_length=300),
+    limit: int = Query(50, ge=1, le=200),
     parsed: bool | None = None,
-    dates: str | None = None,
+    dates: str | None = Query(None, max_length=700),
 ) -> dict:
     return {
         "items": PaperService().list_papers(

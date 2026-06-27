@@ -108,7 +108,9 @@ class ChatService:
             for row in rows
         ]
 
-    def messages(self, session_id: str) -> list[dict]:
+    def messages(self, session_id: str, user_id: str | None = None) -> list[dict]:
+        if user_id is not None:
+            self._ensure_session_owned(user_id, session_id)
         with transaction() as connection:
             rows = connection.execute(
                 "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY id ASC",
@@ -150,6 +152,7 @@ class ChatService:
         mode: str = "paper_ace",
     ) -> dict:
         ensure_user(user_id)
+        self._ensure_session_owned(user_id, session_id)
         self.preferences.update_from_text(user_id, message)
         stored_message = self._message_for_storage(message, attachment_paper_ids)
         with transaction() as connection:
@@ -179,7 +182,7 @@ class ChatService:
                 "UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (session_id,),
             )
-        return {"answer": answer, "messages": self.messages(session_id)}
+        return {"answer": answer, "messages": self.messages(session_id, user_id)}
 
     def submit_mission(
         self,
@@ -245,6 +248,7 @@ class ChatService:
         mode: str = "paper_ace",
     ) -> AsyncIterator[str]:
         ensure_user(user_id)
+        self._ensure_session_owned(user_id, session_id)
         self.preferences.update_from_text(user_id, message)
         stored_message = self._message_for_storage(message, attachment_paper_ids)
         with transaction() as connection:
@@ -391,6 +395,15 @@ class ChatService:
                 (session_id, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def _ensure_session_owned(self, user_id: str, session_id: str) -> None:
+        with transaction() as connection:
+            row = connection.execute(
+                "SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?",
+                (session_id, user_id),
+            ).fetchone()
+        if not row:
+            raise AppError("Chat session not found", 404, "chat_session_not_found")
 
     def _mission_to_api(self, row: dict) -> dict:
         return {

@@ -2,6 +2,7 @@ import json
 import re
 
 from app.db.connection import transaction
+from app.core.errors import AppError
 from app.features.chat.memory_system import ConversationMemoryManager
 from app.features.chat.persistence import SQLiteCheckpointer, SQLiteStore
 from app.features.papers.service import paper_to_api
@@ -124,10 +125,17 @@ class UserPreferenceService:
                 FROM papers p
                 WHERE NOT EXISTS (
                   SELECT 1 FROM paper_favorites f
-                  WHERE f.paper_id = p.id AND f.user_id = ?
+                  WHERE f.paper_id = p.id
                 )
-                """,
-                (user_id,),
+                AND NOT EXISTS (
+                  SELECT 1 FROM chat_sessions s
+                  WHERE s.paper_id = p.id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM daily_papers d
+                  WHERE d.paper_id = p.id
+                )
+                """
             ).fetchall()
             paper_ids = [row["id"] for row in rows]
             if paper_ids:
@@ -212,11 +220,12 @@ class UserPreferenceService:
             ],
             use_cache=False,
         )
+        response_text = response.content
         recommendations: list[dict] = []
         try:
-            start = response.index("[")
-            end = response.rindex("]") + 1
-            recommendations = json.loads(response[start:end])
+            start = response_text.index("[")
+            end = response_text.rindex("]") + 1
+            recommendations = json.loads(response_text[start:end])
         except (ValueError, json.JSONDecodeError):
             recommendations = []
 
@@ -276,6 +285,12 @@ class UserPreferenceService:
             folder = self.create_folder(user_id, "默认收藏")
             folder_id = folder["id"]
         with transaction() as connection:
+            folder = connection.execute(
+                "SELECT id FROM favorite_folders WHERE id = ? AND user_id = ?",
+                (folder_id, user_id),
+            ).fetchone()
+            if not folder:
+                raise AppError("Favorite folder not found", 404, "favorite_folder_not_found")
             connection.execute(
                 """
                 INSERT INTO paper_favorites(user_id, paper_id, folder_id)

@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import date
 from pathlib import Path
 
@@ -215,9 +216,22 @@ class PaddleOCRTool:
         page_num: int | None = None,
     ) -> None:
         for name, url in images.items():
-            suffix = f"_{page_num}.jpg" if page_num is not None and "." not in name else ""
-            target = output_dir / f"{name}{suffix}"
+            target = output_dir / self._safe_asset_name(name, page_num)
             target.parent.mkdir(parents=True, exist_ok=True)
             response = await client.get(url)
             if response.status_code == 200:
                 target.write_bytes(response.content)
+
+    def _safe_asset_name(self, name: str, page_num: int | None = None) -> str:
+        raw_name = Path(str(name)).name
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name).strip("._")
+        if not cleaned:
+            cleaned = "image"
+        path = Path(cleaned)
+        suffix = path.suffix if path.suffix else ".jpg"
+        stem = path.stem or "image"
+        if page_num is not None:
+            cleaned = f"{stem}_{page_num}{suffix}"
+        elif not path.suffix:
+            cleaned = f"{cleaned}{suffix}"
+        return cleaned[:160]

@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import Sequence
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Query
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from app.features.daily_papers.service import DailyPaperService
@@ -22,7 +22,7 @@ class DailyPaperRunRequest(BaseModel):
     ]
     max_results: Annotated[
         int,
-        Field(default=12, validation_alias=AliasChoices("maxResults", "max_results"), ge=1, le=2000),
+        Field(default=12, validation_alias=AliasChoices("maxResults", "max_results"), ge=1, le=100),
     ]
 
 
@@ -33,7 +33,10 @@ def _parse_categories(value: str | None) -> Sequence[str]:
 
 
 @router.get("")
-def list_daily_papers(targetDate: str | None = None, categories: str | None = None) -> dict:
+def list_daily_papers(
+    targetDate: str | None = Query(None, max_length=10),
+    categories: str | None = Query(None, max_length=300),
+) -> dict:
     service = DailyPaperService()
     return {"items": service.list_daily_papers(targetDate, _parse_categories(categories))}
 

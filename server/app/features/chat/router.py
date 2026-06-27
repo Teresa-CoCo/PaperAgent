@@ -17,10 +17,10 @@ class SessionRequest(BaseModel):
 
 
 class MessageRequest(BaseModel):
-    message: str = Field(min_length=1)
+    message: str = Field(min_length=1, max_length=12_000)
     paperId: int | None = None
-    selection: str | None = None
-    attachmentPaperIds: list[int] = Field(default_factory=list)
+    selection: str | None = Field(default=None, max_length=20_000)
+    attachmentPaperIds: list[int] = Field(default_factory=list, max_length=20)
     mode: str = Field(default="paper_ace", pattern="^(paper|ace|paper_ace)$")
 
 
@@ -40,8 +40,8 @@ def list_agents(_: str = Depends(current_user_id)) -> dict:
 
 
 @router.get("/sessions/{session_id}/messages")
-def list_messages(session_id: str, _: str = Depends(current_user_id)) -> dict:
-    return {"items": ChatService().messages(session_id)}
+def list_messages(session_id: str, user_id: str = Depends(current_user_id)) -> dict:
+    return {"items": ChatService().messages(session_id, user_id)}
 
 
 @router.delete("/sessions/{session_id}")

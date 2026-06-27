@@ -78,6 +78,7 @@ class PaperService:
         parsed: bool | None = None,
         date_filters: list[dict] | None = None,
     ) -> list[dict]:
+        limit = max(1, min(int(limit), 200))
         where: list[str] = []
         params: list[object] = []
         if category and category != ALL_CATEGORIES:
@@ -131,6 +132,7 @@ class PaperService:
         return [paper_to_api(rows_by_id[paper_id]) for paper_id in unique_ids if paper_id in rows_by_id]
 
     def search_local(self, query: str, limit: int = 12) -> list[dict]:
+        limit = max(1, min(int(limit), 30))
         terms = [token.strip() for token in query.replace("，", " ").replace(",", " ").split() if token.strip()]
         # Keep broad acronyms useful for queries like VLA/RAG/LLM.
         keywords = [term for term in terms if len(term) >= 2][:8]
@@ -151,6 +153,7 @@ class PaperService:
         return [paper_to_api(row) for row in rows]
 
     def recent_papers(self, limit: int = 20) -> list[dict]:
+        limit = max(1, min(int(limit), 100))
         with transaction() as connection:
             rows = connection.execute(
                 """
