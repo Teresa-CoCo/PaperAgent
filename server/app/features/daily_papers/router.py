@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import Sequence
 from typing import Annotated
 
@@ -68,5 +67,4 @@ async def create_run(
         payload.target_date or service.default_target_date(),
         payload.max_results,
     )
-    asyncio.create_task(service.run_queue())
     return run

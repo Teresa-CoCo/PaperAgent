@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from langgraph.store.base import BaseStore
@@ -172,7 +172,7 @@ class ConversationMemoryManager:
             existing_bundle=existing_bundle,
             source_refs=source_refs,
         )
-        now = datetime.utcnow().replace(microsecond=0).isoformat()
+        now = datetime.now(UTC).replace(microsecond=0).isoformat()
         session_value = {
             "summary": payload.get("session_summary") or existing_bundle.session.summary,
             "open_questions": _unique_list(payload.get("open_questions") or existing_bundle.session.open_questions),
@@ -184,7 +184,7 @@ class ConversationMemoryManager:
         if not episode_summary:
             episode_summary = f"{message[:120]} -> {final_answer[:180]}"
         episode_topics = _unique_list(payload.get("episode_topics") or _keyword_guess(message))
-        episode_key = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        episode_key = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
         episode_value = {
             "summary": episode_summary[:600],
             "topics": episode_topics[:10],

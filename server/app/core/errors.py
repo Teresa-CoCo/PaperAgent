@@ -13,6 +13,32 @@ class AppError(Exception):
         super().__init__(message)
 
 
+class NotFoundError(AppError):
+    def __init__(self, resource: str, resource_id: str = "") -> None:
+        super().__init__(f"{resource} not found{f': {resource_id}' if resource_id else ''}", 404, "not_found")
+
+
+class ValidationError(AppError):
+    def __init__(self, message: str, field: str = "") -> None:
+        super().__init__(message, 422, "validation_error")
+        self.field = field
+
+
+class AuthError(AppError):
+    def __init__(self, message: str = "Authentication required") -> None:
+        super().__init__(message, 401, "auth_required")
+
+
+class ForbiddenError(AppError):
+    def __init__(self, message: str = "Permission denied") -> None:
+        super().__init__(message, 403, "forbidden")
+
+
+class RateLimitError(AppError):
+    def __init__(self, message: str = "Rate limit exceeded") -> None:
+        super().__init__(message, 429, "rate_limit_exceeded")
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     response = JSONResponse(
         status_code=exc.status_code,

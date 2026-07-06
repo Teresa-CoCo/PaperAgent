@@ -98,21 +98,40 @@ async def stream_message(
     return StreamingResponse(event_stream(), media_type="application/x-ndjson; charset=utf-8")
 
 
-class ApproveRequest(BaseModel):
-    approved: bool = True
+class SessionUpdateRequest(BaseModel):
+    paperId: int | None = None
 
 
-@router.post("/sessions/{session_id}/tools/{tool_call_id}/approve")
-def approve_tool_call(
-    session_id: str,
-    tool_call_id: str,
-    payload: ApproveRequest,
-    _: str = Depends(current_user_id),
-) -> dict:
-    ok = ChatService.approve_tool_call(tool_call_id, payload.approved)
-    if not ok:
-        return {"status": "not_found", "message": "No pending approval for this tool call"}
-    return {"status": "approved" if payload.approved else "denied"}
+@router.patch("/sessions/{session_id}")
+def update_session(session_id: str, payload: SessionUpdateRequest, user_id: str = Depends(current_user_id)) -> dict:
+    from app.db.connection import transaction
+    from app.core.errors import AppError
+    with transaction() as conn:
+        row = conn.execute("SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?", (session_id, user_id)).fetchone()
+        if not row:
+            raise AppError("Chat session not found", 404, "chat_session_not_found")
+        conn.execute("UPDATE chat_sessions SET paper_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (payload.paperId, session_id))
+    return {"id": session_id, "paperId": payload.paperId}
+
+
+@router.get("/usage")
+def get_usage(user_id: str = Depends(current_user_id)) -> dict:
+    from app.features.chat.workflow_store import ChatWorkflowStore
+    from app.features.chat.runtime import today_key, get_chat_runtime_settings
+    store = ChatWorkflowStore()
+    runtime = get_chat_runtime_settings()
+    usage = store.daily_usage(user_id, today_key())
+    return {
+        "dailyTokenBudget": runtime.daily_user_token_budget,
+        "dailyToolBudget": runtime.daily_user_tool_budget,
+        "today": {
+            "promptTokens": usage["prompt_tokens"],
+            "completionTokens": usage["completion_tokens"],
+            "totalTokens": usage["total_tokens"],
+            "toolCalls": usage["tool_calls"],
+            "estimatedCostUsd": usage["estimated_cost_usd"],
+        },
+    }
 
 
 @missions_router.get("/{mission_id}")

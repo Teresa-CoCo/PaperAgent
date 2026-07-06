@@ -6,7 +6,7 @@ import { PaperList } from "./components/PaperList";
 import { PaperViewer } from "./components/PaperViewer";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar, type LibraryMode } from "./components/Sidebar";
-import { api, type AgentActivity, type AgentInfo, type ChatMessage, type ChatMission, type ChatSession, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper, type StreamEvent, type ThinkingItem, type ToolCallInfo } from "./lib/api";
+import { api, type AgentActivity, type AgentInfo, type ChatMessage, type ChatMission, type ChatSession, type ChatUsage, type CrawlJob, type DailyPaperEntry, type DailyPaperRun, type DateFilter, type FavoriteFolder, type OcrQuota, type Paper, type StreamEvent, type ThinkingItem, type ToolCallInfo } from "./lib/api";
 
 type ViewMode = "summary" | "markdown" | "pdf";
 type ChatMode = "paper_ace";
@@ -68,6 +68,8 @@ export default function App() {
   const [ocrStatus, setOcrStatus] = useState("");
   const [error, setError] = useState<string>("");
   const [query, setQuery] = useState("");
+  const [usage, setUsage] = useState<ChatUsage | undefined>();
+  const [config, setConfig] = useState<{ llmProvider?: string; llmModel?: string; llmMaxContextChars?: number; braveSearchEnabled?: boolean; shellToolEnabled?: boolean }>({});
 
   const gridClass = useMemo(() => {
     const flags = [];
@@ -82,8 +84,10 @@ export default function App() {
       setCategories(data.categories);
       setCategory(data.categories[0] || "cs.AI");
       setDailyCategories([data.categories.find((item) => item !== "all") || data.categories[0] || "cs.AI"]);
+      setConfig({ llmProvider: data.llmProvider, llmModel: data.llmModel, llmMaxContextChars: data.llmMaxContextChars, braveSearchEnabled: data.braveSearchEnabled, shellToolEnabled: data.shellToolEnabled });
     }).catch((reason) => setError(reason.message));
     api.quota().then(setQuota).catch(() => undefined);
+    api.usage().then(setUsage).catch(() => undefined);
     api.favoriteFolders().then((data) => setFolders(data.items)).catch(() => undefined);
     api.listSessions().then((data) => setSessions(data.items)).catch(() => undefined);
     api.agents().then((data) => setAgents(data.items)).catch(() => undefined);
@@ -257,9 +261,9 @@ export default function App() {
         setSessions(latest.items);
         return;
       }
-      const session = await api.createSession(mode, paper?.id, "Paper Ace Paper");
+      const session = await api.createSession(mode, undefined, "Paper Ace Paper");
       setSessionId(session.id);
-      setSessions([{ id: session.id, scope: mode, paperId: paper?.id, title: "Paper Ace Paper", updatedAt: new Date().toISOString() }, ...latest.items]);
+      setSessions([{ id: session.id, scope: mode, paperId: undefined, title: "Paper Ace Paper", updatedAt: new Date().toISOString() }, ...latest.items]);
     } catch (reason) {
       setError((reason as Error).message);
     }
@@ -277,11 +281,6 @@ export default function App() {
   async function openHistorySession(session: ChatSession) {
     setError("");
     try {
-      if ((session.scope === "paper" || session.scope === "paper_ace") && session.paperId && activePaper?.id !== session.paperId) {
-        const paper = await api.getPaper(session.paperId);
-        setActivePaper(paper);
-        setViewMode("summary");
-      }
       await selectSession(session.id);
       setHistoryOpen(false);
     } catch (reason) {
@@ -293,11 +292,11 @@ export default function App() {
     setError("");
     try {
       const title = "Paper Ace Paper";
-      const session = await api.createSession(chatMode, activePaper?.id, title);
+      const session = await api.createSession(chatMode, undefined, title);
       const next: ChatSession = {
         id: session.id,
         scope: chatMode,
-        paperId: activePaper?.id,
+        paperId: undefined,
         title,
         preview: "",
         createdAt: new Date().toISOString(),
@@ -741,18 +740,6 @@ export default function App() {
         }));
         break;
       }
-      case "approval": {
-        // Store approval info for the dialog
-        setToolCallsBySession((prev) => ({
-          ...prev,
-          [sid]: (prev[sid] || []).map((tc) =>
-            tc.toolCallId === event.toolCallId
-              ? { ...tc, status: "running", summary: `⚠️ 需要批准: ${event.command}` }
-              : tc
-          )
-        }));
-        break;
-      }
       case "error":
         flushStreamText(sid, assistantId);
         setMessagesBySession((prev) => {
@@ -821,18 +808,6 @@ export default function App() {
     setError(reason.message);
   }
 
-  function handleApproveToolCall(toolCallId: string, approved: boolean) {
-    setToolCallsBySession((prev) => ({
-      ...prev,
-      [sessionId]: (prev[sessionId] || []).map((tc) =>
-        tc.toolCallId === toolCallId
-          ? { ...tc, status: approved ? "running" : "denied", summary: approved ? tc.summary : "❌ 已拒绝" }
-          : tc
-      )
-    }));
-    api.approveToolCall(sessionId, toolCallId, approved).catch(() => undefined);
-  }
-
   function extractMentionQuery(value: string) {
     const lastAt = value.lastIndexOf("@");
     if (lastAt === -1) return null;
@@ -890,6 +865,9 @@ export default function App() {
               setSelectedPaperIds([]);
               void loadPapers(category, query);
             }}
+            usage={usage}
+            config={config}
+            onRefreshUsage={() => api.usage().then(setUsage).catch(() => undefined)}
           />
         ) : libraryMode === "daily" ? (
           <DailyPaperPanel
@@ -965,7 +943,6 @@ export default function App() {
         onInput={setInput}
         onSend={sendMessage}
         onSubmitMission={submitBackgroundMission}
-        onApproveToolCall={(toolCallId, approved) => handleApproveToolCall(toolCallId, approved)}
         onAttachPaper={attachPaperFromMention}
         onRemoveAttachment={removeChatAttachment}
       />

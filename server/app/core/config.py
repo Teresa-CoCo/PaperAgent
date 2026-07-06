@@ -83,9 +83,19 @@ class Settings(BaseSettings):
         if self.chat_prompt_dir:
             self.chat_prompt_dir.mkdir(parents=True, exist_ok=True)
 
+    def validate(self) -> list[str]:
+        warnings = []
+        if not self.llm_api_key:
+            warnings.append("LLM_API_KEY is not set — chat and analysis will fail")
+        if not self.paddleocr_token:
+            warnings.append("PADDLEOCR_TOKEN is not set — OCR will fail")
+        return warnings
+
 
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
     settings.ensure_paths()
+    for warning in settings.validate():
+        print(f"[config] WARNING: {warning}")
     return settings

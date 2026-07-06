@@ -8,7 +8,8 @@ from app.db.connection import transaction
 from app.features.chat.agents import agent_catalog
 from app.features.chat.conversation import ChatConversationBuilder, citation_report
 from app.features.chat.memory import AgentMemoryStore
-from app.features.chat.persistence import SQLiteCheckpointer, SQLiteStore
+from app.features.chat.persistence import SQLiteStore
+from app.features.chat.runtime import user_facing_error
 from app.features.chat.workflow import PaperAceWorkflowEngine, WorkflowRequest
 from app.features.papers.arxiv_tool import ArxivTool
 from app.features.papers.service import PaperService
@@ -33,7 +34,6 @@ class ChatService:
         self.daily_rag = DailyPaperRAGStore()
         self.builder = ChatConversationBuilder(self.papers)
         self.memory_store = SQLiteStore()
-        self.checkpointer = SQLiteCheckpointer()
         self.workflow = PaperAceWorkflowEngine(
             llm=self.llm,
             papers=self.papers,
@@ -138,7 +138,6 @@ class ChatService:
                 raise AppError("Chat session not found", 404, "chat_session_not_found")
             connection.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
         self.workflow.memory_manager.clear_session_memory(self.memory_store, user_id, session_id)
-        self.checkpointer.delete_thread(session_id)
         return {"deletedSessionId": session_id}
 
     async def reply(
@@ -160,6 +159,12 @@ class ChatService:
                 "INSERT INTO chat_messages(session_id, role, content, selection) VALUES(?, 'user', ?, ?)",
                 (session_id, stored_message, selection),
             )
+        if paper_id is not None:
+            with transaction() as connection:
+                connection.execute(
+                    "UPDATE chat_sessions SET paper_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (paper_id, session_id),
+                )
         session_history = self._recent_session_messages(session_id)
         answer = await self.workflow.run(
             WorkflowRequest(
@@ -256,6 +261,12 @@ class ChatService:
                 "INSERT INTO chat_messages(session_id, role, content, selection) VALUES(?, 'user', ?, ?)",
                 (session_id, stored_message, selection),
             )
+        if paper_id is not None:
+            with transaction() as connection:
+                connection.execute(
+                    "UPDATE chat_sessions SET paper_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (paper_id, session_id),
+                )
         session_history = self._recent_session_messages(session_id)
         text_chunks: list[str] = []
         try:
@@ -427,23 +438,10 @@ class ChatService:
         return f"{message}\n\n{attachment_block}"
 
     def _normalize_mode(self, mode: str | None) -> str:
-        if mode in {"paper", "ace", PAPER_ACE_SCOPE}:
-            return PAPER_ACE_SCOPE
         return PAPER_ACE_SCOPE
 
     def _user_facing_error(self, exc: Exception) -> str:
-        message = str(exc).strip()
-        if exc.__class__.__name__ == "HTTPStatusError":
-            return "模型服务请求失败，Paper Ace Paper 本轮没有生成结果。请重试；如果仍失败，请检查 LLM 接口配置。"
-        if message:
-            return f"生成失败：{message}"
-        return "生成失败：外部服务连接异常"
+        return user_facing_error(exc)
 
     def _citation_report(self, answer: str, source_refs: list[str]) -> str:
         return citation_report(answer, source_refs)
-
-    @staticmethod
-    def approve_tool_call(tool_call_id: str, approved: bool) -> bool:
-        from app.features.tools.registry import resolve_approval
-
-        return resolve_approval(tool_call_id, approved)

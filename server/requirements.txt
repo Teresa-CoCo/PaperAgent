@@ -3,9 +3,8 @@ uvicorn[standard]==0.34.0
 pydantic-settings==2.7.1
 httpx==0.28.1
 apscheduler==3.11.0
-python-multipart==0.0.20
 markitdown[pdf]==0.1.1
 chromadb==1.0.9
-sentence-transformers==3.4.1
 transformers>=4.51.0,<5
 langgraph>=0.2.60,<0.7
+pytest>=8.0

@@ -7,6 +7,7 @@ from pathlib import Path
 from app.core.config import get_settings
 
 _DB_LOCK = threading.RLock()
+_local = threading.local()
 
 
 def dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -14,26 +15,33 @@ def dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
     return {key: row[index] for index, key in enumerate(fields)}
 
 
-def connect() -> sqlite3.Connection:
-    settings = get_settings()
-    connection = sqlite3.connect(settings.database_path, check_same_thread=False, timeout=30)
-    connection.row_factory = dict_factory
-    connection.execute("PRAGMA foreign_keys=ON")
-    return connection
+def _get_connection() -> sqlite3.Connection:
+    if not hasattr(_local, "connection") or _local.connection is None:
+        settings = get_settings()
+        conn = sqlite3.connect(settings.database_path, check_same_thread=False, timeout=30)
+        conn.row_factory = dict_factory
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA journal_mode=WAL")
+        _local.connection = conn
+    return _local.connection
 
 
 @contextmanager
 def transaction() -> Iterator[sqlite3.Connection]:
     with _DB_LOCK:
-        connection = connect()
+        conn = _get_connection()
         try:
-            yield connection
-            connection.commit()
+            yield conn
+            conn.commit()
         except Exception:
-            connection.rollback()
+            conn.rollback()
             raise
-        finally:
-            connection.close()
+
+
+def close_all_connections() -> None:
+    if hasattr(_local, "connection") and _local.connection:
+        _local.connection.close()
+        _local.connection = None
 
 
 def init_db() -> None:

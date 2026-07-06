@@ -28,7 +28,7 @@ from app.features.chat.conversation import (
 )
 from app.features.chat.memory_system import ConversationMemoryManager, MemoryBundle
 from app.features.chat.observability import WorkflowTrace
-from app.features.chat.persistence import SQLiteCheckpointer, SQLiteStore
+from app.features.chat.persistence import SQLiteStore
 from app.features.chat.prompts import get_prompt_store
 from app.features.chat.runtime import (
     assess_prompt_injection,
@@ -37,6 +37,7 @@ from app.features.chat.runtime import (
     get_chat_runtime_settings,
     retry_async,
     today_key,
+    user_facing_error,
 )
 from app.features.chat.workflow_store import ChatWorkflowStore
 from app.features.tools.llm import ChatMessage, LLMClient, LLMResponse
@@ -94,6 +95,7 @@ class WorkflowGraphState(TypedDict, total=False):
     memory_bundle: MemoryBundle
     history_summary: str
     final_answer: str
+    context_chunks: list[str]
 
 
 class PaperAceWorkflowEngine:
@@ -119,7 +121,6 @@ class PaperAceWorkflowEngine:
         self.runtime = get_chat_runtime_settings()
         self.store = ChatWorkflowStore()
         self.memory_store = SQLiteStore()
-        self.checkpointer = SQLiteCheckpointer()
         self.builder = ChatConversationBuilder(papers)
         self.memory_manager = ConversationMemoryManager(llm)
         self._emitters: dict[str, EmitFn] = {}
@@ -337,6 +338,10 @@ class PaperAceWorkflowEngine:
         request = state["request"]
         classification = state["classification"]
         memory_bundle = state.get("memory_bundle", MemoryBundle())
+        context_chunks = self.papers.retrieve_context(
+            request.paper_id,
+            request.message if request.message.strip() else request.selection or "",
+        ) if request.paper_id else []
         all_results: list[AgentRunResult] = []
 
         for batch_index, batch in enumerate(plan.parallel_batches):
@@ -349,6 +354,7 @@ class PaperAceWorkflowEngine:
                 injection_note=state["injection_note"],
                 trace=trace,
                 memory_bundle=memory_bundle,
+                context_chunks=context_chunks,
             )
             all_results.extend(batch_results)
             trace.log("chat_candidate_batch_exit", batch_index=batch_index, produced=len(batch_results))
@@ -373,64 +379,10 @@ class PaperAceWorkflowEngine:
             injection_note=state["injection_note"],
             trace=trace,
             memory_bundle=memory_bundle,
+            context_chunks=context_chunks,
         )
         self._evaluation_results[workflow_id] = evaluation_result
-        return {"final_answer": evaluation_result.content}
-
-    async def _candidate_batch_node(self, state: WorkflowGraphState) -> dict:
-        plan = state["plan"]
-        batch_index = state.get("batch_index", 0)
-        state["trace"].log("chat_candidate_batch_enter", batch_index=batch_index, batch_total=len(plan.parallel_batches))
-        if batch_index >= len(plan.parallel_batches):
-            return {"batch_index": batch_index}
-        batch_results = await self._run_batch(
-            workflow_id=state["workflow_id"],
-            batch=plan.parallel_batches[batch_index],
-            request=state["request"],
-            classification=state["classification"],
-            injection_note=state["injection_note"],
-            trace=state["trace"],
-            memory_bundle=state.get("memory_bundle", MemoryBundle()),
-        )
-        self._candidate_results.setdefault(state["workflow_id"], []).extend(batch_results)
-        state["trace"].log("chat_candidate_batch_exit", batch_index=batch_index, produced=len(batch_results))
-        return {"batch_index": batch_index + 1}
-
-    def _route_after_candidate_batch(self, state: WorkflowGraphState) -> str:
-        plan = state["plan"]
-        batch_index = state.get("batch_index", 0)
-        route = "candidate_batch" if batch_index < len(plan.parallel_batches) else "evaluate"
-        state["trace"].log("chat_candidate_batch_route", batch_index=batch_index, route=route)
-        return route
-
-    async def _evaluate_node(self, state: WorkflowGraphState) -> dict:
-        plan = state["plan"]
-        workflow_id = state["workflow_id"]
-        results = list(self._candidate_results.get(workflow_id, []))
-        state["trace"].log("chat_evaluate_enter", candidate_results=len(results))
-        await self._emit_event(
-            workflow_id,
-            {
-                "type": "thinking",
-                "agentKey": plan.evaluation_agent.key,
-                "agentName": plan.evaluation_agent.name,
-                "content": "Checking candidate outputs for cited claims and composing final answer.",
-            }
-        )
-        evaluation_result = await self._evaluate(
-            workflow_id=state["workflow_id"],
-            agent=plan.evaluation_agent,
-            request=state["request"],
-            classification=state["classification"],
-            results=results,
-            injection_note=state["injection_note"],
-            trace=state["trace"],
-            memory_bundle=state.get("memory_bundle", MemoryBundle()),
-        )
-        self._evaluation_results[workflow_id] = evaluation_result
-        return {
-            "final_answer": evaluation_result.content,
-        }
+        return {"final_answer": evaluation_result.content, "context_chunks": context_chunks}
 
     async def _finalize_node(self, state: WorkflowGraphState, runtime: Runtime[WorkflowRuntimeContext]) -> dict:
         request = state["request"]
@@ -442,10 +394,7 @@ class PaperAceWorkflowEngine:
 
         output_by_agent = {result.agent.key: result.content for result in results}
         self.agent_memory.update_from_turn(request.user_id, request.message, final_answer, output_by_agent)
-        context_chunks = self.papers.retrieve_context(
-            request.paper_id,
-            request.message if request.message.strip() else request.selection or "",
-        ) if request.paper_id else []
+        context_chunks = state.get("context_chunks", [])
         source_refs = available_source_refs(request.paper_id, request.attachment_paper_ids, context_chunks, results)
         await self.memory_manager.persist_turn(
             store=runtime.store,
@@ -528,6 +477,7 @@ class PaperAceWorkflowEngine:
         injection_note: str,
         trace: WorkflowTrace,
         memory_bundle: MemoryBundle,
+        context_chunks: list[str],
     ) -> list[AgentRunResult]:
         semaphore = asyncio.Semaphore(self.runtime.parallel_agent_limit)
 
@@ -541,6 +491,7 @@ class PaperAceWorkflowEngine:
                     injection_note=injection_note,
                     trace=trace,
                     memory_bundle=memory_bundle,
+                    context_chunks=context_chunks,
                 )
 
         tasks = [asyncio.create_task(run_one(agent)) for agent in batch]
@@ -578,12 +529,9 @@ class PaperAceWorkflowEngine:
         injection_note: str,
         trace: WorkflowTrace,
         memory_bundle: MemoryBundle,
+        context_chunks: list[str],
     ) -> AgentRunResult:
         registered = get_registered_agent(agent.key)
-        context_chunks = self.papers.retrieve_context(
-            request.paper_id,
-            request.message if request.message.strip() else request.selection or "",
-        ) if request.paper_id else []
         memories = self.agent_memory.get_many(request.user_id, [agent.key])
         prompt_version = "/".join(
             part
@@ -850,11 +798,8 @@ class PaperAceWorkflowEngine:
         injection_note: str,
         trace: WorkflowTrace,
         memory_bundle: MemoryBundle,
+        context_chunks: list[str],
     ) -> AgentRunResult:
-        context_chunks = self.papers.retrieve_context(
-            request.paper_id,
-            request.message if request.message.strip() else request.selection or "",
-        ) if request.paper_id else []
         source_refs = available_source_refs(request.paper_id, request.attachment_paper_ids, context_chunks, results)
         candidate_block = "\n\n".join(
             f"## {result.agent.name}\n{result.content}\nTool refs: {', '.join(refs_from_tool_results(result.tool_results)) or 'none'}"
@@ -1011,14 +956,7 @@ class PaperAceWorkflowEngine:
         return f"工具 {name} 执行完成"
 
     def _user_facing_error(self, exc: Exception) -> str:
-        message = str(exc).strip()
-        if exc.__class__.__name__ == "HTTPStatusError":
-            return "模型服务请求失败，Paper Ace Paper 本轮没有生成结果。请重试；如果仍失败，请检查 LLM 接口配置。"
-        if isinstance(exc, TimeoutError):
-            return "生成失败：本轮执行超时，请缩小问题范围后重试。"
-        if message:
-            return f"生成失败：{message}"
-        return "生成失败：外部服务连接异常"
+        return user_facing_error(exc)
 
     async def _emit_event(self, workflow_id: str, event: dict) -> None:
         emit = self._emitters.get(workflow_id)

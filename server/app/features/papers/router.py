@@ -1,5 +1,4 @@
 import httpx
-import asyncio
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, Query
 
@@ -45,13 +44,17 @@ def parse_date_filters(value: str | None) -> list[dict[str, str]]:
 
 
 @router.get("/config")
-def public_config() -> dict:
+def public_config(_: str = Depends(current_user_id)) -> dict:
     settings = get_settings()
     return {
         "categories": ["all", *settings.default_arxiv_category_list],
         "ocrDailyPageLimit": settings.paddleocr_daily_page_limit,
         "ocrChunkPages": settings.paddleocr_chunk_pages,
         "llmProvider": settings.llm_provider,
+        "llmModel": settings.llm_model,
+        "llmMaxContextChars": settings.llm_max_context_chars,
+        "braveSearchEnabled": bool(settings.brave_api_key),
+        "shellToolEnabled": settings.chat_shell_tool_enabled,
     }
 
 
@@ -62,6 +65,7 @@ def list_papers(
     limit: int = Query(50, ge=1, le=200),
     parsed: bool | None = None,
     dates: str | None = Query(None, max_length=700),
+    _: str = Depends(current_user_id),
 ) -> dict:
     return {
         "items": PaperService().list_papers(
@@ -75,7 +79,7 @@ def list_papers(
 
 
 @router.get("/papers/{paper_id}")
-def get_paper(paper_id: int) -> dict:
+def get_paper(paper_id: int, _: str = Depends(current_user_id)) -> dict:
     return PaperService().get_paper(paper_id)
 
 
@@ -85,11 +89,9 @@ def delete_paper(paper_id: int, _: str = Depends(current_user_id)) -> dict:
 
 
 @router.post("/papers/crawl")
-async def crawl_papers(payload: CrawlRequest, _: str = Depends(current_user_id)) -> dict:
-    user_id = _
+async def crawl_papers(payload: CrawlRequest, user_id: str = Depends(current_user_id)) -> dict:
     service = PaperService()
     job = service.enqueue_crawl_job(user_id, payload.category, payload.dateFilters, payload.maxResults)
-    asyncio.create_task(PaperService().run_crawl_queue())
     return job
 
 
@@ -107,7 +109,6 @@ def get_crawl_job(job_id: int, _: str = Depends(current_user_id)) -> dict:
 async def analyze_paper(
     paper_id: int, payload: AnalyzeRequest, _: str = Depends(current_user_id)
 ) -> dict:
-    _ = payload.force
     return await PaperService().analyze(paper_id)
 
 

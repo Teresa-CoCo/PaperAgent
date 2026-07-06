@@ -22,7 +22,6 @@ type Props = {
   onInput: (value: string) => void;
   onSend: () => void;
   onSubmitMission: () => void;
-  onApproveToolCall: (toolCallId: string, approved: boolean) => void;
   onAttachPaper: (paper: Paper) => void;
   onRemoveAttachment: (paperId: number) => void;
 };
@@ -115,26 +114,6 @@ const ThinkingPanel = memo(function ThinkingPanel({ items, loading }: { items: T
   );
 });
 
-function ApprovalDialog({ toolCall, onApprove, onDeny }: {
-  toolCall: ToolCallInfo;
-  onApprove: () => void;
-  onDeny: () => void;
-}) {
-  return (
-    <div className="approval-overlay">
-      <div className="approval-dialog">
-        <div className="approval-header">⚠️ 需要批准</div>
-        <div className="approval-command-label">Shell 命令需要您的批准才能执行：</div>
-        <pre className="approval-command">{toolCall.summary?.replace("⚠️ 需要批准: ", "") || ""}</pre>
-        <div className="approval-actions">
-          <button className="approval-deny" onClick={onDeny}>拒绝</button>
-          <button className="approval-approve" onClick={onApprove}>批准执行</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 const MessageList = memo(function MessageList({
   messages,
   toolCalls,
@@ -198,12 +177,9 @@ export function ChatPanel({
   onInput,
   onSend,
   onSubmitMission,
-  onApproveToolCall,
   onAttachPaper,
   onRemoveAttachment
 }: Props) {
-  const pendingApproval = useMemo(() => toolCalls.find((tc) => tc.summary?.startsWith("⚠️ 需要批准")), [toolCalls]);
-
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -213,13 +189,6 @@ export function ChatPanel({
 
   return (
     <Panel className={`chat-panel ${collapsed ? "is-collapsed" : ""}`}>
-      {pendingApproval && (
-        <ApprovalDialog
-          toolCall={pendingApproval}
-          onApprove={() => onApproveToolCall(pendingApproval.toolCallId, true)}
-          onDeny={() => onApproveToolCall(pendingApproval.toolCallId, false)}
-        />
-      )}
       <div className="chat-toggle">
         <button onClick={onToggle} aria-label="折叠右侧聊天">
           {collapsed ? "←" : "→"}
@@ -240,7 +209,11 @@ export function ChatPanel({
           </div>
 
           <div className="chat-context">
-            {activePaper ? activePaper.title : "统一入口：论文 RAG、数据库检索、arXiv/Web 搜索、推荐与核验"}
+            {activePaper ? (
+              <span>参考论文：{activePaper.title}</span>
+            ) : (
+              <span>无论文聚焦 · 可提问研究方向、推荐或最新进展</span>
+            )}
           </div>
 
           <AgentDock agents={agents} activities={agentActivities} />

@@ -70,6 +70,18 @@ export type OcrQuota = {
   dailyLimit: number;
 };
 
+export type ChatUsage = {
+  dailyTokenBudget: number;
+  dailyToolBudget: number;
+  today: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    toolCalls: number;
+    estimatedCostUsd: number;
+  };
+};
+
 export type ChatMessage = {
   id: number;
   role: "user" | "assistant";
@@ -229,8 +241,18 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  config: () => request<{ categories: string[]; ocrDailyPageLimit: number; ocrChunkPages: number }>("/api/config"),
+  config: () => request<{
+    categories: string[];
+    ocrDailyPageLimit: number;
+    ocrChunkPages: number;
+    llmProvider: string;
+    llmModel: string;
+    llmMaxContextChars: number;
+    braveSearchEnabled: boolean;
+    shellToolEnabled: boolean;
+  }>("/api/config"),
   quota: () => request<OcrQuota>("/api/quota/ocr"),
+  usage: () => request<ChatUsage>("/api/chat/usage"),
   listPapers: (category?: string, query?: string, options: { parsed?: boolean; dateFilters?: DateFilter[] } = {}) => {
     const params = new URLSearchParams();
     if (category && category !== "all") params.set("category", category);
@@ -305,6 +327,11 @@ export const api = {
     request<{ deletedSessionId: string }>(`/api/chat/sessions/${sessionId}`, {
       method: "DELETE"
     }),
+  updateSession: (sessionId: string, paperId: number | null) =>
+    request<{ id: string; paperId: number | null }>(`/api/chat/sessions/${sessionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ paperId })
+    }),
   listMessages: (sessionId: string) => request<{ items: ChatMessage[] }>(`/api/chat/sessions/${sessionId}/messages`),
   submitMission: (
     sessionId: string,
@@ -357,11 +384,6 @@ export const api = {
       }
     }
   },
-  approveToolCall: (sessionId: string, toolCallId: string, approved: boolean) =>
-    request<{ status: string }>(`/api/chat/sessions/${sessionId}/tools/${toolCallId}/approve`, {
-      method: "POST",
-      body: JSON.stringify({ approved })
-    }),
   recommendations: () => request<{ items: Paper[] }>("/api/users/recommendations"),
   settings: () => request<UserSettings>("/api/users/settings"),
   updatePreferenceText: (text: string) =>

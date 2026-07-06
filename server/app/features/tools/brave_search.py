@@ -10,7 +10,7 @@ class BraveSearchTool:
             return []
 
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
+            async with httpx.AsyncClient(timeout=None) as client:
                 response = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     headers={"X-Subscription-Token": settings.brave_api_key},

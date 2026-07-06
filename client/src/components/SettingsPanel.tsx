@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import { Panel } from "./Panel";
-import { api, type Paper, type UserSettings } from "../lib/api";
+import { api, type ChatUsage, type Paper, type UserSettings } from "../lib/api";
 
 type Props = {
   activePaper?: Paper;
   onPaperDeleted: () => void;
   onDatabaseChanged?: () => void;
+  usage?: ChatUsage;
+  config?: { llmProvider?: string; llmModel?: string; llmMaxContextChars?: number; braveSearchEnabled?: boolean; shellToolEnabled?: boolean };
+  onRefreshUsage?: () => void;
 };
 
-export function SettingsPanel({ activePaper, onPaperDeleted, onDatabaseChanged }: Props) {
+export function SettingsPanel({ activePaper, onPaperDeleted, onDatabaseChanged, usage, config, onRefreshUsage }: Props) {
   const [settings, setSettings] = useState<UserSettings | undefined>();
   const [preferenceText, setPreferenceText] = useState("");
   const [loading, setLoading] = useState(false);
@@ -96,6 +99,38 @@ export function SettingsPanel({ activePaper, onPaperDeleted, onDatabaseChanged }
       </header>
 
       <div className="settings-body">
+        {config?.llmModel && (
+          <section className="settings-section">
+            <h3>模型配置</h3>
+            <div className="stats-grid">
+              <span>Provider <strong>{config.llmProvider || "-"}</strong></span>
+              <span>模型 <strong>{config.llmModel}</strong></span>
+              <span>上下文 <strong>{config.llmMaxContextChars?.toLocaleString() || "-"}</strong></span>
+            </div>
+            <div className="stats-grid">
+              <span>Web 搜索 <strong>{config.braveSearchEnabled ? "✓" : "✗"}</strong></span>
+              <span>Shell 工具 <strong>{config.shellToolEnabled ? "✓" : "✗"}</strong></span>
+            </div>
+          </section>
+        )}
+
+        {usage && (
+          <section className="settings-section">
+            <h3>LLM 用量</h3>
+            <div className="stats-grid">
+              <span>今日 Token <strong>{usage.today.totalTokens.toLocaleString()}</strong></span>
+              <span>预算 <strong>{usage.dailyTokenBudget.toLocaleString()}</strong></span>
+              <span>工具调用 <strong>{usage.today.toolCalls}</strong></span>
+              <span>预估成本 <strong>${usage.today.estimatedCostUsd.toFixed(4)}</strong></span>
+            </div>
+            <div className="quota-track">
+              <span style={{ width: `${Math.min(100, (usage.today.totalTokens / usage.dailyTokenBudget) * 100)}%` }} />
+            </div>
+            <p>Token 预算每日重置。超出预算时聊天会返回 429 错误。</p>
+            {onRefreshUsage && <button onClick={onRefreshUsage} disabled={loading}>刷新用量</button>}
+          </section>
+        )}
+
         <section className="settings-section">
           <h3>研究偏好</h3>
           <p>用自然语言描述你的研究兴趣。推荐文章会把数据库内论文摘要交给 AI，并按这段偏好生成推荐理由。</p>

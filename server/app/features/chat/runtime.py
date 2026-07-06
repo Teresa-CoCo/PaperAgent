@@ -97,6 +97,17 @@ def is_retryable_error(exc: Exception) -> bool:
     return isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError))
 
 
+def user_facing_error(exc: Exception) -> str:
+    message = str(exc).strip()
+    if exc.__class__.__name__ == "HTTPStatusError":
+        return "模型服务请求失败，Paper Ace Paper 本轮没有生成结果。请重试；如果仍失败，请检查 LLM 接口配置。"
+    if isinstance(exc, TimeoutError):
+        return "生成失败：本轮执行超时，请缩小问题范围后重试。"
+    if message:
+        return f"生成失败：{message}"
+    return "生成失败：外部服务连接异常"
+
+
 async def retry_async(label: str, operation: Any, attempts: int, base_delay: float) -> Any:
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):

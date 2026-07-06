@@ -12,3 +12,12 @@ def current_user_id(x_user_id: str | None = Header(default=None)) -> str:
     if not USER_ID_PATTERN.fullmatch(user_id):
         raise HTTPException(status_code=400, detail="Invalid X-User-Id")
     return user_id
+
+
+def require_user_id(x_user_id: str | None = Header(default=None)) -> str:
+    user_id = (x_user_id or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="X-User-Id header required")
+    if not USER_ID_PATTERN.fullmatch(user_id):
+        raise HTTPException(status_code=400, detail="Invalid X-User-Id")
+    return user_id

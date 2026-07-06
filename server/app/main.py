@@ -4,12 +4,13 @@ import asyncio
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from starlette.responses import JSONResponse
+from starlette.staticfiles import StaticFiles
 
 from app.core.config import get_settings
 from app.core.errors import AppError, app_error_handler, unhandled_error_handler
 from app.core.logging import request_context_middleware, security_headers_middleware
-from app.db.connection import init_db
+from app.db.connection import init_db, transaction
 from app.features.chat.router import missions_router, router as chat_router
 from app.features.chat.service import ChatService
 from app.features.daily_papers.router import router as daily_papers_router
@@ -18,6 +19,21 @@ from app.features.users.router import router as users_router
 from app.features.daily_papers.service import DailyPaperService
 from app.features.papers.service import PaperService
 from app.scheduler import create_scheduler
+
+
+class AuthedStaticFiles(StaticFiles):
+    async def __call__(self, scope, receive, send):
+        # In production, add real auth here. For now, check X-User-Id header.
+        headers = dict(scope.get("headers", []))
+        user_id = headers.get(b"x-user-id", b"").decode("utf-8", errors="replace")
+        if not user_id.strip():
+            response = JSONResponse(
+                {"error": {"code": "auth_required", "message": "X-User-Id header required"}},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
 
 
 @asynccontextmanager
@@ -33,6 +49,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Give in-flight requests a moment to drain before cancelling.
+        await asyncio.sleep(0.5)
         for task in background_tasks:
             task.cancel()
         await asyncio.gather(*background_tasks, return_exceptions=True)
@@ -50,7 +68,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
         allow_credentials=True,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
     app.include_router(papers_router)
@@ -58,7 +76,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(missions_router)
     app.include_router(users_router)
-    app.mount("/storage", StaticFiles(directory=settings.storage_root), name="storage")
+    app.mount("/storage", AuthedStaticFiles(directory=settings.storage_root), name="storage")
     return app
 
 
@@ -72,5 +90,9 @@ def health() -> dict:
 
 @app.get("/ready")
 def ready() -> dict:
-    init_db()
-    return {"status": "ready"}
+    try:
+        with transaction() as conn:
+            conn.execute("SELECT 1")
+        return {"status": "ready"}
+    except Exception:
+        return {"status": "degraded"}

@@ -404,19 +404,15 @@ def all_tools() -> list[ToolDef]:
 SAFE_COMMAND_PREFIXES = (
     "ls", "pwd", "echo ", "cat ", "head ", "tail ", "wc ", "sort ", "grep ",
     "find ", "which ", "whoami", "date", "uname", "df ", "du ", "free",
-    "ps ", "env", "printenv", "python3", "python",
+    "ps ", "env", "printenv",
     "node", "npm", "tsc",
     "git status", "git log", "git diff", "git branch", "git remote",
     "git config", "pip list", "pip show",
     "mkdir", "mkdir ",
-    "curl", "curl ",
-    "wget", "wget ",
     "cp ", "mv ",
     "touch ", "chmod ",
     "file ", "stat ", "readlink",
     "ping ", "dig ", "nslookup",
-    "pip install ", "pip3 install ",
-    "python3 -c", "python -c",
 )
 
 
@@ -440,22 +436,19 @@ async def shell_execute(
     """Execute a shell command and return its output.
 
     Non-dangerous commands are executed directly. Dangerous commands
-    require user approval via the approval system.
+    are blocked and return an error. The harness enforces an outer timeout.
     """
     danger = is_dangerous_command(command)
     if danger is not None:
         return json.dumps({
             "error": f"Command blocked: {danger}",
-            "hint": "This command requires user approval. "
+            "hint": "This command is not in the safe list. "
                     "The tool maker agent can help wrap approved commands into reusable tools.",
         })
-    proc = await asyncio.wait_for(
-        asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        ),
-        timeout=timeout,
+    proc = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await proc.communicate()
     output = stdout.decode("utf-8", errors="replace")
@@ -468,43 +461,6 @@ async def shell_execute(
     if proc.returncode != 0:
         result["error"] = f"Command exited with return code {proc.returncode}"
     return json.dumps(result)
-
-
-# ---------------------------------------------------------------------------
-# Approval system (for dangerous shell commands)
-# ---------------------------------------------------------------------------
-
-_approval_events: dict[str, asyncio.Event] = {}
-_approval_commands: dict[str, str] = {}
-_approval_decisions: dict[str, bool] = {}
-
-
-def register_approval(tool_call_id: str, command: str) -> None:
-    _approval_events[tool_call_id] = asyncio.Event()
-    _approval_commands[tool_call_id] = command
-
-
-def await_approval(tool_call_id: str) -> asyncio.Event:
-    return _approval_events[tool_call_id]
-
-
-def resolve_approval(tool_call_id: str, approved: bool) -> bool:
-    event = _approval_events.get(tool_call_id)
-    if not event:
-        return False
-    _approval_decisions[tool_call_id] = approved
-    event.set()
-    return True
-
-
-def approval_decision(tool_call_id: str) -> bool:
-    return _approval_decisions.get(tool_call_id, False)
-
-
-def cleanup_approval(tool_call_id: str) -> None:
-    _approval_events.pop(tool_call_id, None)
-    _approval_commands.pop(tool_call_id, None)
-    _approval_decisions.pop(tool_call_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +486,26 @@ def tool_map() -> dict[str, ToolDef]:
     return {tool.name: tool for tool in all_tools()}
 
 
+def _validate_arguments(kwargs: dict, schema: dict) -> str | None:
+    """Return error message if kwargs don't match schema, None if valid."""
+    required = schema.get("required", [])
+    for field in required:
+        if field not in kwargs:
+            return f"Missing required parameter: {field}"
+    properties = schema.get("properties", {})
+    for key, value in kwargs.items():
+        if key not in properties:
+            continue  # Allow extra params for flexibility
+        expected_type = properties[key].get("type")
+        if expected_type == "string" and not isinstance(value, str):
+            return f"Parameter '{key}' must be a string"
+        if expected_type == "integer" and not isinstance(value, int):
+            return f"Parameter '{key}' must be an integer"
+        if expected_type == "array" and not isinstance(value, list):
+            return f"Parameter '{key}' must be an array"
+    return None
+
+
 async def execute_tool(
     name: str,
     arguments: str,
@@ -544,4 +520,7 @@ async def execute_tool(
         kwargs = json.loads(arguments) if arguments else {}
     except json.JSONDecodeError as exc:
         return json.dumps({"error": f"Invalid arguments JSON: {exc}"})
+    error = _validate_arguments(kwargs, tool.parameters)
+    if error:
+        return json.dumps({"error": error})
     return await tool.handler(**kwargs, _ctx=ctx)

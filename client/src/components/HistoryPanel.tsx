@@ -72,6 +72,9 @@ export function HistoryPanel({ open, sessions, activeSessionId, onClose, onSelec
                 <strong>{session.title || "Paper Ace Paper"}</strong>
                 <span>{formatDate(session.updatedAt || session.createdAt)}</span>
               </span>
+              {session.paperId && (
+                <span className="history-paper-link">论文 #{session.paperId}</span>
+              )}
               <span className="history-meta">
                 {sessionScopeLabel(session)}
                 {status ? ` · ${status}` : ""}
