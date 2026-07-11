@@ -1,6 +1,13 @@
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from app.core.logging import log_event
+
+if TYPE_CHECKING:
+    from app.features.chat.workflow_store import ChatWorkflowStore
 
 
 @dataclass
@@ -48,3 +55,20 @@ class WorkflowTrace:
             mode=self.mode,
             **fields,
         )
+
+
+@asynccontextmanager
+async def observe_llm_call(
+    trace: "WorkflowTrace",
+    label: str,
+    user_id: str,
+    store: "ChatWorkflowStore",
+) -> AsyncIterator[None]:
+    """Context manager that tracks timing for an LLM call.
+    The caller is responsible for updating trace.totals and daily_usage with token counts."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        trace.log("llm_call_completed", label=label, duration_ms=duration_ms)

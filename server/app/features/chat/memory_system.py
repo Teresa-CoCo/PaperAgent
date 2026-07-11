@@ -21,6 +21,7 @@ class SessionMemory:
     open_questions: list[str] = field(default_factory=list)
     salient_facts: list[str] = field(default_factory=list)
     updated_at: str = ""
+    working_summary: str = ""
 
     def brief(self) -> str:
         parts: list[str] = []
@@ -99,11 +100,13 @@ class ConversationMemoryManager:
         session_item = store.get((*SESSION_NAMESPACE, user_id), session_id)
         profile_item = store.get((*PROFILE_NAMESPACE, user_id), "profile")
         episode_items = store.search((*EPISODE_NAMESPACE, user_id), query=query, limit=4)
-        return MemoryBundle(
+        bundle = MemoryBundle(
             session=self._session_from_item(session_item.value if session_item else {}),
             profile=self._profile_from_item(profile_item.value if profile_item else {}),
             episodes=[self._episode_from_item(item.key, item.value) for item in episode_items],
         )
+        bundle.working_summary = bundle.session.working_summary
+        return bundle
 
     def should_summarize_history(self, session_history: list[dict], existing_summary: str) -> bool:
         if len(session_history) >= 10:
@@ -175,6 +178,7 @@ class ConversationMemoryManager:
         now = datetime.now(UTC).replace(microsecond=0).isoformat()
         session_value = {
             "summary": payload.get("session_summary") or existing_bundle.session.summary,
+            "working_summary": payload.get("working_summary") or "",
             "open_questions": _unique_list(payload.get("open_questions") or existing_bundle.session.open_questions),
             "salient_facts": _unique_list(payload.get("salient_facts") or existing_bundle.session.salient_facts),
             "updated_at": now,
@@ -219,6 +223,7 @@ class ConversationMemoryManager:
         if not self.llm.settings.llm_api_key:
             return {
                 "session_summary": f"{existing_bundle.session.summary}\nUser: {message[:160]}\nAssistant: {final_answer[:240]}".strip()[:1200],
+                "working_summary": f"{existing_bundle.session.summary}\nUser: {message[:160]}\nAssistant: {final_answer[:240]}".strip()[:1200],
                 "open_questions": existing_bundle.session.open_questions[:4],
                 "salient_facts": _unique_list(_keyword_guess(message) + _keyword_guess(final_answer))[:8],
                 "user_profile": {
@@ -271,6 +276,7 @@ class ConversationMemoryManager:
             open_questions=_unique_list(value.get("open_questions") or []),
             salient_facts=_unique_list(value.get("salient_facts") or []),
             updated_at=str(value.get("updated_at") or ""),
+            working_summary=str(value.get("working_summary") or ""),
         )
 
     def _profile_from_item(self, value: dict[str, Any]) -> ProfileMemory:

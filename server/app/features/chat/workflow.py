@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
 from app.core.errors import AppError
+from app.features.chat.agent_loop import AgentLoop, AgentLoopConfig, BudgetGuard
 from app.features.chat.agents import (
     PAPER_ACE_AGENT_CHARTER,
     AgentSpec,
@@ -17,7 +18,6 @@ from app.features.chat.agents import (
     IntentClassification,
     build_execution_plan,
     fallback_intent_classification,
-    get_registered_agent,
     parse_intent_classification,
 )
 from app.features.chat.conversation import (
@@ -41,7 +41,6 @@ from app.features.chat.runtime import (
 )
 from app.features.chat.workflow_store import ChatWorkflowStore
 from app.features.tools.llm import ChatMessage, LLMClient, LLMResponse
-from app.features.tools.registry import ToolContext, execute_tool, tool_definitions
 
 EmitFn = Callable[[dict], Awaitable[None]]
 
@@ -126,6 +125,20 @@ class PaperAceWorkflowEngine:
         self._emitters: dict[str, EmitFn] = {}
         self._candidate_results: dict[str, list[AgentRunResult]] = {}
         self._evaluation_results: dict[str, AgentRunResult] = {}
+        self.agent_loop = AgentLoop(
+            llm=self.llm,
+            papers=self.papers,
+            preferences=self.preferences,
+            search_tool=self.search_tool,
+            arxiv_tool=self.arxiv_tool,
+            agent_memory=self.agent_memory,
+            daily_rag=self.daily_rag,
+            builder=self.builder,
+            prompts=self.prompts,
+            store=self.store,
+            runtime=self.runtime,
+            emit_fn=self._emit_event_wrapper,
+        )
         self.graph = self._build_graph()
 
     async def run(self, request: WorkflowRequest) -> str:
@@ -314,6 +327,21 @@ class PaperAceWorkflowEngine:
         request = state["request"]
         workflow_id = state["workflow_id"]
         bundle = state.get("memory_bundle", MemoryBundle())
+
+        # If we already have a working_summary from the previous turn's persist_turn, reuse it
+        if bundle.working_summary:
+            await self._emit_event(
+                workflow_id,
+                {
+                    "type": "thinking",
+                    "agentKey": "summary",
+                    "agentName": "Summary Agent",
+                    "content": "Reusing previous turn's working memory summary.",
+                },
+            )
+            return {"memory_bundle": bundle, "history_summary": bundle.working_summary}
+
+        # Only call LLM if no existing summary
         summary = await self.memory_manager.summarize_history(request.session_history[:-1], bundle.session.summary)
         bundle.working_summary = summary
         await self._emit_event(
@@ -439,7 +467,8 @@ class PaperAceWorkflowEngine:
                 ),
             ),
         ]
-        self._assert_token_budget(request.user_id, messages)
+        budget = BudgetGuard(self.store, self.runtime, request.user_id)
+        budget.check_token(messages)
         response = await retry_async(
             "intent-classifier",
             lambda: self.llm.complete(
@@ -531,261 +560,41 @@ class PaperAceWorkflowEngine:
         memory_bundle: MemoryBundle,
         context_chunks: list[str],
     ) -> AgentRunResult:
-        registered = get_registered_agent(agent.key)
-        memories = self.agent_memory.get_many(request.user_id, [agent.key])
-        prompt_version = "/".join(
-            part
-            for part in [
-                self.prompts.version("candidate_base"),
-                self.prompts.version(registered.prompt_key) if registered.prompt_key else "",
-            ]
-            if part
-        )
-        run_id = self.store.start_agent_run(
-            workflow_id,
-            agent_key=agent.key,
-            agent_name=agent.name,
-            phase=agent.phase,
-            prompt_version=prompt_version,
-        )
-        started = time.perf_counter()
-        tool_results: list[dict] = []
-        prompt_tokens = 0
-        completion_tokens = 0
-        total_tokens = 0
-        attempts = 0
-        tool_call_count = 0
-        status = "success"
-        content = "No candidate output generated."
-        error_message: str | None = None
-        history_limit = 6 if memory_bundle.working_summary or memory_bundle.session.summary else 12
-        messages = [
-            ChatMessage("system", PAPER_ACE_AGENT_CHARTER),
-            ChatMessage("system", registered.system_prompt()),
-            ChatMessage("system", self.builder.memory_system_prompt(memory_bundle.prompt_block())),
-            ChatMessage(
-                "system",
-                (
-                    f"Runtime date: {date.today().isoformat()}.\n"
-                    f"Current user id: {request.user_id}.\n"
-                    f"Intent classification: {classification.primary_intent}; {', '.join(classification.intents)}.\n"
-                    f"Agent memory:\n{memories[agent.key].brief() if agent.key in memories else 'No dedicated memory.'}\n"
-                    f"Security note: {injection_note}"
-                ),
+        budget = BudgetGuard(self.store, self.runtime, request.user_id)
+        loop_result = await self.agent_loop.run(
+            AgentLoopConfig(
+                agent=agent,
+                workflow_id=workflow_id,
+                user_id=request.user_id,
+                session_id=request.session_id,
+                message=request.message,
+                paper_id=request.paper_id,
+                selection=request.selection,
+                attachment_paper_ids=request.attachment_paper_ids,
+                injection_note=injection_note,
+                memory_bundle=memory_bundle,
+                context_chunks=context_chunks,
+                session_history=request.session_history,
+                classification=classification,
             ),
-            *self.builder.history_to_chat_messages(request.session_history[:-1], limit=history_limit),
-            ChatMessage(
-                "user",
-                self.builder.paper_ace_user_prompt(
-                    request.message,
-                    paper_id=request.paper_id,
-                    selection=request.selection,
-                    context_chunks=context_chunks,
-                    attachment_paper_ids=request.attachment_paper_ids,
-                ),
-            ),
-        ]
-        allowed_tool_names = set(agent.tools)
-        tools = [tool for tool in tool_definitions() if tool["function"]["name"] in allowed_tool_names]
-        ctx = self._tool_ctx(request.user_id)
-
-        try:
-            async with asyncio.timeout(self.runtime.agent_timeout_seconds):
-                for turn in range(self.runtime.agent_max_tool_turns):
-                    self._assert_token_budget(request.user_id, messages)
-                    response = await retry_async(
-                        f"candidate-{agent.key}-{turn}",
-                        lambda: self.llm.complete(
-                            f"paper-ace-{agent.key}-{turn}",
-                            messages,
-                            use_cache=False,
-                            tools=tools,
-                            timeout_seconds=self.runtime.agent_timeout_seconds,
-                        ),
-                        attempts=self.runtime.llm_retry_attempts,
-                        base_delay=self.runtime.llm_retry_backoff_seconds,
-                    )
-                    attempts += 1
-                    used_prompt_tokens, used_completion_tokens, used_total_tokens = self._resolve_usage(
-                        response,
-                        messages,
-                        response.content,
-                    )
-                    prompt_tokens += used_prompt_tokens
-                    completion_tokens += used_completion_tokens
-                    total_tokens += used_total_tokens
-                    if not response.tool_calls:
-                        content = response.content or content
-                        break
-                    if tool_call_count + len(response.tool_calls) > self.runtime.max_tool_calls_per_agent:
-                        status = "degraded"
-                        content = "Agent stopped after tool quota; use available tool results cautiously."
-                        break
-                    messages.append(
-                        ChatMessage(
-                            role="assistant",
-                            content=response.content or "",
-                            tool_calls=[
-                                {"id": tool_call.id, "type": "function", "function": tool_call.function}
-                                for tool_call in response.tool_calls
-                            ],
-                        )
-                    )
-                    for tool_call in response.tool_calls:
-                        parsed_result = await self._execute_tool(
-                            workflow_id=workflow_id,
-                            agent=agent,
-                            allowed_tool_names=allowed_tool_names,
-                            tool_call_id=f"{agent.key}-{tool_call.id}",
-                            name=tool_call.function["name"],
-                            arguments=tool_call.function["arguments"],
-                            ctx=ctx,
-                            request=request,
-                            trace=trace,
-                        )
-                        tool_call_count += 1
-                        tool_results.append(
-                            {
-                                "id": f"{agent.key}-{tool_call.id}",
-                                "name": tool_call.function["name"],
-                                "arguments": tool_call.function["arguments"],
-                                "result": parsed_result,
-                            }
-                        )
-                        messages.append(
-                            ChatMessage(
-                                role="tool",
-                                content=json.dumps(parsed_result, ensure_ascii=False),
-                                tool_call_id=tool_call.id,
-                            )
-                        )
-                else:
-                    status = "degraded"
-                    content = "Agent stopped after tool-call limit; use available tool results cautiously."
-        except AppError:
-            raise
-        except Exception as exc:
-            status = "failed"
-            error_message = self._user_facing_error(exc)
-            content = f"unsupported\n\n{error_message}"
-
-        estimated_cost = estimate_cost_usd(prompt_tokens, completion_tokens)
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        self.store.finish_agent_run(
-            run_id,
-            status=status,
-            attempt_count=attempts,
-            duration_ms=duration_ms,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            estimated_cost_usd=estimated_cost,
-            tool_call_count=tool_call_count,
-            metadata={"model": self.llm.settings.llm_model, "tool_results": len(tool_results)},
-            error_message=error_message,
-        )
-        trace.totals.add_usage(prompt_tokens, completion_tokens, total_tokens, estimated_cost)
-        self.store.increment_daily_usage(
-            request.user_id,
-            today_key(),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            estimated_cost_usd=estimated_cost,
-        )
-        trace.log(
-            "chat_agent_completed",
-            orchestration="langgraph",
-            agent_key=agent.key,
-            status=status,
-            duration_ms=duration_ms,
-            total_tokens=total_tokens,
-            tool_call_count=tool_call_count,
-            estimated_cost_usd=estimated_cost,
+            trace,
+            budget,
         )
         return AgentRunResult(
             agent=agent,
-            content=content,
-            tool_results=tool_results,
-            prompt_version=prompt_version,
-            attempt_count=attempts,
-            duration_ms=duration_ms,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            estimated_cost_usd=estimated_cost,
-            model=self.llm.settings.llm_model,
-            status=status,
-            error_message=error_message,
+            content=loop_result.content,
+            tool_results=loop_result.tool_results,
+            prompt_version=loop_result.prompt_version,
+            attempt_count=loop_result.attempt_count,
+            duration_ms=loop_result.duration_ms,
+            prompt_tokens=loop_result.prompt_tokens,
+            completion_tokens=loop_result.completion_tokens,
+            total_tokens=loop_result.total_tokens,
+            estimated_cost_usd=loop_result.estimated_cost_usd,
+            model=loop_result.model,
+            status=loop_result.status,
+            error_message=loop_result.error_message,
         )
-
-    async def _execute_tool(
-        self,
-        *,
-        workflow_id: str,
-        agent: AgentSpec,
-        allowed_tool_names: set[str],
-        tool_call_id: str,
-        name: str,
-        arguments: str,
-        ctx: ToolContext,
-        request: WorkflowRequest,
-        trace: WorkflowTrace,
-    ) -> dict:
-        if name not in allowed_tool_names:
-            return {"error": f"Tool '{name}' is not allowed for agent '{agent.key}'"}
-        self._assert_tool_budget(request.user_id)
-        await self._emit_event(
-            workflow_id,
-            {"type": "tool_start", "toolCallId": tool_call_id, "name": name, "arguments": arguments},
-        )
-        started = time.perf_counter()
-        try:
-            raw_result = await asyncio.wait_for(
-                execute_tool(name, arguments, ctx),
-                timeout=self.runtime.tool_timeout_seconds,
-            )
-            parsed_result = json.loads(raw_result)
-            status = "error" if parsed_result.get("error") else "success"
-            error_message = parsed_result.get("error")
-        except AppError:
-            raise
-        except Exception as exc:
-            parsed_result = {"error": f"Tool execution failed: {exc}"}
-            status = "error"
-            error_message = str(exc)
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        self.store.record_tool_run(
-            workflow_id,
-            agent_key=agent.key,
-            tool_call_id=tool_call_id,
-            tool_name=name,
-            status=status,
-            duration_ms=duration_ms,
-            arguments_json=arguments,
-            result_json=parsed_result,
-            error_message=error_message,
-        )
-        trace.totals.add_tool_call()
-        self.store.increment_daily_usage(request.user_id, today_key(), tool_calls=1)
-        trace.log(
-            "chat_tool_completed",
-            orchestration="langgraph",
-            agent_key=agent.key,
-            tool_name=name,
-            status=status,
-            duration_ms=duration_ms,
-        )
-        await self._emit_event(
-            workflow_id,
-            {
-                "type": "tool_result",
-                "toolCallId": tool_call_id,
-                "name": name,
-                "summary": self._tool_result_summary(name, parsed_result),
-            }
-        )
-        return parsed_result
 
     async def _evaluate(
         self,
@@ -839,7 +648,8 @@ class PaperAceWorkflowEngine:
                 )[:20000],
             ),
         ]
-        self._assert_token_budget(request.user_id, messages)
+        budget = BudgetGuard(self.store, self.runtime, request.user_id)
+        budget.check_token(messages)
         response = await retry_async(
             "evaluation-agent",
             lambda: self.llm.complete(
@@ -901,27 +711,6 @@ class PaperAceWorkflowEngine:
             model=response.model or self.llm.settings.llm_model,
         )
 
-    def _tool_ctx(self, user_id: str) -> ToolContext:
-        return ToolContext(
-            user_id=user_id,
-            paper_service=self.papers,
-            user_preferences=self.preferences,
-            brave_search=self.search_tool,
-            arxiv_tool=self.arxiv_tool,
-            daily_rag=self.daily_rag,
-        )
-
-    def _assert_token_budget(self, user_id: str, messages: list[ChatMessage]) -> None:
-        estimate = estimate_tokens(*(message.content for message in messages))
-        usage = self.store.daily_usage(user_id, today_key())
-        if usage["total_tokens"] + estimate > self.runtime.daily_user_token_budget:
-            raise AppError("Daily token budget exceeded", 429, "chat_token_budget_exceeded")
-
-    def _assert_tool_budget(self, user_id: str) -> None:
-        usage = self.store.daily_usage(user_id, today_key())
-        if usage["tool_calls"] + 1 > self.runtime.daily_user_tool_budget:
-            raise AppError("Daily tool budget exceeded", 429, "chat_tool_budget_exceeded")
-
     def _resolve_usage(self, response: LLMResponse, messages: list[ChatMessage], content: str) -> tuple[int, int, int]:
         prompt_tokens = response.prompt_tokens or estimate_tokens(*(message.content for message in messages))
         completion_tokens = response.completion_tokens or estimate_tokens(content)
@@ -933,30 +722,11 @@ class PaperAceWorkflowEngine:
             return []
         return [text[index : index + size] for index in range(0, len(text), size)]
 
-    def _tool_result_summary(self, name: str, result: dict) -> str:
-        if name == "search_database":
-            total = result.get("total", 0)
-            return f"找到 {total} 篇相关论文" if total else "未找到匹配论文"
-        if name == "search_rag_database":
-            count = result.get("total_chunks", 0)
-            title = result.get("paper_title", "")
-            return f"从「{title}」中找到 {count} 个相关片段" if title else f"找到 {count} 个相关片段"
-        if name == "web_search":
-            total = result.get("total", 0)
-            return f"网络搜索到 {total} 条结果" if total else "网络搜索未找到结果"
-        if name == "arxiv_search":
-            total = result.get("total", 0)
-            return f"arXiv 搜索到 {total} 篇论文" if total else "arXiv 未找到匹配论文"
-        if name == "list_favorite_folders":
-            folders = result.get("folders", [])
-            return f"共 {len(folders)} 个收藏文件夹"
-        if name == "add_to_favorites":
-            added = result.get("added", 0)
-            return f"已收藏 {added} 篇论文到「{result.get('folder_name', '')}」"
-        return f"工具 {name} 执行完成"
-
     def _user_facing_error(self, exc: Exception) -> str:
         return user_facing_error(exc)
+
+    async def _emit_event_wrapper(self, workflow_id: str, event: dict) -> None:
+        await self._emit_event(workflow_id, event)
 
     async def _emit_event(self, workflow_id: str, event: dict) -> None:
         emit = self._emitters.get(workflow_id)

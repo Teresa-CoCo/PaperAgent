@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from app.core.config import get_settings
+from app.db.migrations import run_migrations
 
 _DB_LOCK = threading.RLock()
 _local = threading.local()
@@ -141,6 +142,7 @@ def init_db() -> None:
             )
             """
         )
+        run_migrations(connection)
 
 
 def ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:

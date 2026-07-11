@@ -1,6 +1,6 @@
 import httpx
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 
 from app.core.config import get_settings
 from app.core.errors import AppError
@@ -89,9 +89,14 @@ def delete_paper(paper_id: int, _: str = Depends(current_user_id)) -> dict:
 
 
 @router.post("/papers/crawl")
-async def crawl_papers(payload: CrawlRequest, user_id: str = Depends(current_user_id)) -> dict:
+async def crawl_papers(
+    payload: CrawlRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(current_user_id),
+) -> dict:
     service = PaperService()
     job = service.enqueue_crawl_job(user_id, payload.category, payload.dateFilters, payload.maxResults)
+    background_tasks.add_task(PaperService().run_crawl_queue)
     return job
 
 

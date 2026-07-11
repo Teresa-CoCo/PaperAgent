@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,6 +22,8 @@ class ToolDef:
     description: str
     parameters: dict
     handler: ToolHandler
+    max_results: int = 0  # 0 means no harness-level limit
+    summary_fn: Callable[[dict], str] | None = None
 
 
 @dataclass
@@ -201,8 +203,25 @@ async def add_to_favorites(
 # Registry
 # ---------------------------------------------------------------------------
 
+_TOOL_REGISTRY: dict[str, ToolDef] = {}
+
+
+def register_tool(name: str, description: str, parameters: dict) -> Callable:
+    """Decorator to register a tool. The handler must be an async function."""
+    def decorator(handler: ToolHandler) -> ToolHandler:
+        _TOOL_REGISTRY[name] = ToolDef(
+            name=name,
+            description=description,
+            parameters=parameters,
+            handler=handler,
+        )
+        return handler
+    return decorator
+
+
 def all_tools() -> list[ToolDef]:
-    tools = [
+    tools = list(_TOOL_REGISTRY.values())
+    tools.extend([
         ToolDef(
             name="search_database",
             description=(
@@ -367,7 +386,7 @@ def all_tools() -> list[ToolDef]:
             },
             handler=add_to_favorites,
         ),
-    ]
+    ])
     if get_settings().chat_shell_tool_enabled:
         tools.append(ToolDef(
             name="shell_execute",
